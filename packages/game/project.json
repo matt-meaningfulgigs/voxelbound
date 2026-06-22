@@ -1,0 +1,12 @@
+{
+  "id": "voxelbound-demo",
+  "name": "VoxelBound Demo",
+  "timing": {
+    "worldTickRate": 60,
+    "animStepRate": 3
+  },
+  "startMap": "demo_town",
+  "startPosition": [32, 0, 32],
+  "startingParty": ["hero"],
+  "currencySymbol": "$"
+}

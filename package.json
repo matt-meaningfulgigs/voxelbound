@@ -1,0 +1,16 @@
+{
+  "name": "voxelbound",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Voxatron-style voxel EarthBound RPG engine + Studio",
+  "scripts": {
+    "dev": "pnpm --filter @voxelbound/game dev",
+    "dev:studio": "pnpm --filter @voxelbound/studio dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
