@@ -4,9 +4,15 @@ Voxatron-style voxel **EarthBound RPG engine** + in-browser **Studio**.
 
 Play like EarthBound. Look like Voxatron. Build everything in the browser.
 
+## Play in the browser
+
+**https://matt-meaningfulgigs.github.io/voxelbound/**
+
+(Published automatically from `main` via GitHub Pages. Requires WebGL.)
+
 ## Repo
 
-https://github.com/matt-meaningfulgigs/voxelbound (private)
+https://github.com/matt-meaningfulgigs/voxelbound
 
 ## Quick start
 
@@ -17,6 +23,12 @@ pnpm dev:studio   # Studio w/ World Settings @ http://localhost:5174
 pnpm test
 pnpm build
 ```
+
+### GitHub Pages
+
+Pushes to `main` run `.github/workflows/deploy-pages.yml`, which builds `@voxelbound/game` and deploys `packages/game/dist`.
+
+One-time repo setup: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
 
 ## Packages
 
