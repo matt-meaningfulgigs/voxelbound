@@ -10,14 +10,16 @@ export class VoxelMesh {
   readonly group = new THREE.Group();
   private mesh: THREE.InstancedMesh | null = null;
   private geometry: THREE.BoxGeometry;
-  private material: THREE.MeshLambertMaterial;
+  private material: THREE.MeshLambertMaterial | THREE.MeshBasicMaterial;
 
-  constructor(bevel = 0.05) {
+  constructor(bevel = 0.05, unlit = false) {
     this.geometry = new THREE.BoxGeometry(1, 1, 1);
     if (bevel > 0) {
       // slight scale for softer look
     }
-    this.material = new THREE.MeshLambertMaterial({ vertexColors: false });
+    this.material = unlit
+      ? new THREE.MeshBasicMaterial()
+      : new THREE.MeshLambertMaterial({ vertexColors: false });
     this.group.add(new THREE.Group()); // placeholder
   }
 
@@ -30,10 +32,30 @@ export class VoxelMesh {
     }
     if (voxels.length === 0) return;
 
-    this.mesh = new THREE.InstancedMesh(this.geometry, this.material, voxels.length);
+    // Cull fully-buried voxels: any voxel whose 6 face-neighbors are all present
+    // is never visible, so drop it. Removes ~0 visible faces but huge tri counts
+    // for solid models (tree crowns, blobs). Pure win, no visual change.
+    const present = new Set<number>();
+    const key = (x: number, y: number, z: number): number =>
+      ((x + 512) & 1023) | (((y + 512) & 1023) << 10) | (((z + 512) & 1023) << 20);
+    for (const v of voxels) present.add(key(v.x, v.y, v.z));
+    const visible = voxels.filter(
+      (v) =>
+        !(
+          present.has(key(v.x + 1, v.y, v.z)) &&
+          present.has(key(v.x - 1, v.y, v.z)) &&
+          present.has(key(v.x, v.y + 1, v.z)) &&
+          present.has(key(v.x, v.y - 1, v.z)) &&
+          present.has(key(v.x, v.y, v.z + 1)) &&
+          present.has(key(v.x, v.y, v.z - 1))
+        ),
+    );
+    if (visible.length === 0) return;
+
+    this.mesh = new THREE.InstancedMesh(this.geometry, this.material, visible.length);
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 
-    voxels.forEach((v, i) => {
+    visible.forEach((v, i) => {
       _dummy.position.set(v.x + 0.5, v.y + 0.5, v.z + 0.5);
       _dummy.updateMatrix();
       this.mesh!.setMatrixAt(i, _dummy.matrix);

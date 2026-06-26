@@ -11,9 +11,11 @@
   },
   "dependencies": {
     "@voxelbound/engine": "workspace:*",
-    "@voxelbound/shared": "workspace:*"
+    "@voxelbound/shared": "workspace:*",
+    "three": "^0.172.0"
   },
   "devDependencies": {
+    "@types/three": "^0.172.0",
     "typescript": "^5.7.3",
     "vite": "^6.0.11"
   }

@@ -5,6 +5,8 @@ export class GameCamera {
   readonly camera: THREE.OrthographicCamera | THREE.PerspectiveCamera;
   private config: CameraConfig;
   private target = new THREE.Vector3();
+  private viewportW = 1;
+  private viewportH = 1;
 
   constructor(settings: WorldSettings) {
     this.config = settings.camera;
@@ -21,9 +23,16 @@ export class GameCamera {
     this.applyConfig(settings.camera);
   }
 
+  /** Downward tilt of the camera in radians (used to stand world-space UI upright). */
+  get pitchRad(): number {
+    return THREE.MathUtils.degToRad(this.config.pitchDeg);
+  }
+
   applySettings(settings: WorldSettings): void {
     this.config = settings.camera;
     this.applyConfig(settings.camera);
+    // viewHeightVoxels controls orthographic zoom via the projection matrix, not position alone
+    this.resize(this.viewportW, this.viewportH);
   }
 
   private applyConfig(cfg: CameraConfig): void {
@@ -39,6 +48,8 @@ export class GameCamera {
   }
 
   resize(width: number, height: number): void {
+    this.viewportW = width;
+    this.viewportH = height;
     const aspect = width / height;
     const h = this.config.viewHeightVoxels * this.config.zoom;
     if (this.camera instanceof THREE.OrthographicCamera) {
@@ -75,9 +86,13 @@ export function setupLighting(
 ): { ambient: THREE.AmbientLight; dir: THREE.DirectionalLight } {
   const ambient = new THREE.AmbientLight(0xffffff, render.ambientIntensity);
   scene.add(ambient);
+  // sky/ground hemisphere fill gives soft directional shading (fake AO depth)
+  const hemi = new THREE.HemisphereLight(0xbfe0ff, 0x55502f, 0.45);
+  scene.add(hemi);
   const az = THREE.MathUtils.degToRad(render.dirLight.azimuthDeg);
   const el = THREE.MathUtils.degToRad(render.dirLight.elevationDeg);
-  const dir = new THREE.DirectionalLight(0xffffff, render.dirLight.intensity);
+  // warm afternoon sun
+  const dir = new THREE.DirectionalLight(0xfff0d8, render.dirLight.intensity);
   dir.position.set(
     Math.cos(el) * Math.sin(az),
     Math.sin(el),

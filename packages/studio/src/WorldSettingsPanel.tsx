@@ -78,7 +78,7 @@ export function WorldSettingsPanel() {
         <span>{settings.timing.worldTickRate} Hz</span>
       </label>
       <p style={{ fontSize: 11, opacity: 0.7, marginTop: 16 }}>
-        Voxel Creator, World Builder, and data editors coming next — engine foundation is live.
+        Live preview of the overworld. Adjust camera and timing to tune the look and feel.
       </p>
     </div>
   );

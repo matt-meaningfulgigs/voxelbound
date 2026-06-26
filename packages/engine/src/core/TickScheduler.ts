@@ -5,13 +5,13 @@ export type WorldTickListener = (tick: number, dt: number) => void;
 export type AnimStepListener = (animStep: number) => void;
 
 export class TickScheduler {
-  readonly timing: TimingConfig;
+  private timing: TimingConfig;
   private accumulator = 0;
   private worldTick = 0;
   private animTickCounter = 0;
   private animStep = 0;
-  private readonly tickInterval: number;
-  private readonly ticksPerFrame: number;
+  private tickInterval: number;
+  private ticksPerFrame: number;
   private worldListeners = new Set<WorldTickListener>();
   private animListeners = new Set<AnimStepListener>();
 
@@ -19,6 +19,18 @@ export class TickScheduler {
     this.timing = timing;
     this.tickInterval = 1 / timing.worldTickRate;
     this.ticksPerFrame = ticksPerAnimFrame(timing);
+  }
+
+  getTiming(): TimingConfig {
+    return this.timing;
+  }
+
+  /** Hot-reload sim + animation clock rates from World Settings. */
+  applyTiming(timing: TimingConfig): void {
+    this.timing = timing;
+    this.tickInterval = 1 / timing.worldTickRate;
+    this.ticksPerFrame = ticksPerAnimFrame(timing);
+    this.animTickCounter = 0;
   }
 
   onWorldTick(fn: WorldTickListener): () => void {

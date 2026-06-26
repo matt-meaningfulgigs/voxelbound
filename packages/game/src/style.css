@@ -1,0 +1,227 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body, #app { width: 100%; height: 100%; overflow: hidden; background: #0a0a0f; }
+#app { position: relative; z-index: 2; }
+/* The WebGL canvas must always fill the window. The renderer sizes the backing
+   store from clientWidth/Height with updateStyle=false, so without this the
+   canvas would display at its raw pixel size and overflow smaller windows. */
+#game-canvas { display: block; width: 100%; height: 100%; }
+
+:root {
+  --ui-font: 'Courier New', ui-monospace, monospace;
+  --panel-bg: rgba(12, 14, 26, 0.94);
+  --panel-border: #f4f4ff;
+  --accent: #ffd23a;
+  --accent2: #e8453c;
+  --good: #5ad05a;
+  --bad: #e8453c;
+}
+
+#ui {
+  position: fixed; inset: 0;
+  pointer-events: none;
+  z-index: 10;
+}
+#ui .panel { pointer-events: auto; }
+
+/* ================= in-game editor ================= */
+#editor-overlay {
+  position: fixed; inset: 0; z-index: 60;
+  display: none; flex-direction: column;
+  background: rgba(8, 10, 18, 0.97);
+  pointer-events: auto;
+  font-family: 'Inter', system-ui, sans-serif; font-size: 13px;
+}
+#editor-overlay.show { display: flex; }
+/* world tab: let clicks fall through to the game canvas */
+#editor-overlay.passthrough { background: transparent; pointer-events: none; }
+#editor-overlay.passthrough .ed-header,
+#editor-overlay.passthrough .ed-sidebar { pointer-events: auto; }
+#editor-overlay.passthrough .ed-body { background: transparent; }
+
+.ed-header {
+  display: flex; align-items: center; gap: 16px;
+  padding: 0 14px; height: 46px; flex: 0 0 auto;
+  background: #141826; border-bottom: 1px solid #2a3040;
+}
+.ed-logo { font-weight: 800; letter-spacing: 1px; color: var(--accent); }
+.ed-logo span { color: #8a93a6; }
+.ed-tabs { display: flex; gap: 4px; }
+.ed-tab {
+  background: transparent; border: none; color: #8a93a6;
+  padding: 7px 14px; border-radius: 6px; cursor: pointer; font-weight: 600;
+}
+.ed-tab:hover { background: #1d2230; color: #fff; }
+.ed-tab.sel { background: #3a7ce0; color: #fff; }
+.ed-close {
+  background: var(--accent2); color: #fff; border: none;
+  padding: 7px 14px; border-radius: 6px; cursor: pointer; font-weight: 700;
+}
+
+.ed-body { flex: 1; min-height: 0; display: flex; }
+.ed-sidebar {
+  width: 290px; flex: 0 0 auto; overflow-y: auto; padding: 12px;
+  background: #11141f; border-right: 1px solid #2a3040;
+}
+.ed-sidebar.wide { width: 520px; }
+.ed-viewport { flex: 1; min-width: 0; background: #10131c; position: relative; display: flex; }
+.ed-slice { flex: 1; min-width: 0; background: #0d1018; position: relative; }
+.ed-preview { width: 320px; flex: 0 0 auto; background: #10131c; border-left: 1px solid #2a3040; position: relative; }
+.ed-preview-tag {
+  position: absolute; top: 8px; left: 8px; z-index: 2;
+  font-size: 10px; color: #8a93a6; background: rgba(8,10,18,0.7);
+  padding: 3px 7px; border-radius: 4px; pointer-events: none;
+}
+
+.ed-block {
+  background: #161a26; border: 1px solid #2a3040; border-radius: 8px;
+  padding: 10px; margin-bottom: 10px;
+}
+.ed-title { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #8a93a6; font-weight: 700; margin-bottom: 8px; }
+.ed-sub { font-size: 11px; color: #8a93a6; margin: 6px 0 4px; font-weight: 700; }
+.ed-help { font-size: 11px; color: #8a93a6; margin-top: 6px; line-height: 1.5; }
+
+.ed-field { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.ed-field > span { width: 52px; flex: 0 0 auto; color: #8a93a6; }
+.ed-in {
+  flex: 1; min-width: 0; background: #1d2230; color: #e6e9f0;
+  border: 1px solid #2a3040; border-radius: 5px; padding: 5px 7px;
+}
+.ed-triple { display: flex; gap: 6px; flex: 1; }
+.ed-triple .ed-in { width: 100%; }
+
+.ed-btn-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 6px; }
+.ed-btn {
+  background: #1d2230; color: #e6e9f0; border: 1px solid #2a3040;
+  border-radius: 6px; padding: 6px 10px; cursor: pointer; font-weight: 600;
+}
+.ed-btn:hover { border-color: #3a7ce0; }
+.ed-btn.sel { background: #3a7ce0; border-color: #3a7ce0; color: #fff; }
+.ed-btn.primary { background: var(--accent); color: #1a1a1a; border-color: var(--accent); }
+.ed-frame-label { color: #8a93a6; min-width: 86px; text-align: center; }
+
+.ed-palette { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
+.ed-swatch { aspect-ratio: 1; border: 2px solid transparent; border-radius: 4px; cursor: pointer; padding: 0; }
+.ed-swatch.sel { border-color: var(--accent); }
+.ed-swatch.add { background: #1d2230; border: 1px dashed #2a3040; color: #8a93a6; font-size: 15px; }
+.ed-pal-edit { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.ed-pal-edit input[type=color] { width: 36px; height: 28px; padding: 0; border: 1px solid #2a3040; background: none; }
+.ed-check { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+
+.ed-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ed-table th { text-align: left; color: #8a93a6; font-weight: 600; padding: 4px; border-bottom: 1px solid #2a3040; }
+.ed-table td { padding: 2px; }
+.ed-cell { width: 100%; background: transparent; color: #e6e9f0; border: 1px solid transparent; border-radius: 4px; padding: 3px 5px; }
+.ed-cell:hover { border-color: #2a3040; }
+.ed-cell:focus { border-color: #3a7ce0; background: #1d2230; outline: none; }
+
+/* ---- HUD ---- */
+#hud {
+  position: fixed; left: 0; right: 0; bottom: 0;
+  padding: 10px 16px;
+  display: flex; justify-content: space-between; align-items: flex-end;
+  font-size: 13px; text-shadow: 1px 1px 0 #000; pointer-events: none;
+}
+#title-logo {
+  position: fixed; top: 14px; left: 16px;
+  font: bold 22px var(--ui-font);
+  color: #fff; text-shadow: 2px 2px 0 var(--accent2); pointer-events: none;
+  letter-spacing: 1px;
+}
+#quest-tracker {
+  position: fixed; top: 52px; left: 16px;
+  background: var(--panel-bg); border: 2px solid var(--panel-border);
+  padding: 8px 12px; font-size: 12px; max-width: 280px; display: none;
+}
+#quest-tracker .qt-title { color: var(--accent); font-weight: bold; }
+#quest-tracker .qt-obj { opacity: 0.9; margin-top: 2px; }
+
+/* ---- generic windows ---- */
+.window {
+  background: var(--panel-bg);
+  border: 3px solid var(--panel-border);
+  border-radius: 4px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.6), inset 0 0 0 2px rgba(0,0,0,0.5);
+  padding: 16px;
+}
+.window h2 { font-size: 16px; margin-bottom: 10px; color: var(--accent); letter-spacing: 1px; }
+.menu-list { list-style: none; }
+.menu-item {
+  padding: 7px 12px; cursor: pointer; border: 2px solid transparent;
+  display: flex; justify-content: space-between; gap: 16px; font-size: 14px;
+}
+.menu-item.sel { border-color: var(--accent); background: rgba(255,210,58,0.12); }
+.menu-item.disabled { opacity: 0.4; }
+.menu-item .right { opacity: 0.85; }
+
+/* ---- dialogue ---- */
+#dialogue {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+  width: min(820px, 92vw); display: none;
+}
+#dialogue .speaker {
+  display: inline-block; background: var(--accent2); color: #fff;
+  padding: 2px 12px; font-weight: bold; font-size: 13px; margin-bottom: -2px;
+  border: 2px solid var(--panel-border); border-bottom: none;
+}
+#dialogue .box { min-height: 96px; font-size: 17px; line-height: 1.5; }
+#dialogue .hint { text-align: right; font-size: 12px; opacity: 0.6; margin-top: 6px; }
+#dialogue .choices { margin-top: 10px; }
+
+/* ---- center overlays (title, gameover, shop, menu) ---- */
+.overlay {
+  position: fixed; inset: 0; display: none;
+  align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.55); pointer-events: auto;
+}
+.overlay.show { display: flex; }
+.overlay .window { width: min(560px, 92vw); max-height: 86vh; overflow: auto; }
+
+/* ---- title ---- */
+#title-screen { background: radial-gradient(circle at 50% 30%, #1a2a4a, #06060c 70%); }
+#title-screen .big {
+  font-size: 56px; font-weight: bold; letter-spacing: 4px; text-align: center;
+  color: #fff; text-shadow: 4px 4px 0 var(--accent2), 8px 8px 0 rgba(0,0,0,0.4);
+  margin-bottom: 6px;
+}
+#title-screen .sub { text-align: center; opacity: 0.8; margin-bottom: 28px; font-size: 14px; }
+
+/* ---- battle ---- */
+#battle-ui { position: fixed; inset: 0; display: none; pointer-events: none; }
+#battle-log {
+  position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+  width: min(760px, 92vw); min-height: 56px; font-size: 16px; line-height: 1.4;
+}
+#battle-bottom {
+  position: fixed; left: 0; right: 0; bottom: 0;
+  display: flex; gap: 10px; padding: 10px; align-items: flex-end; pointer-events: auto;
+}
+#party-windows { display: flex; gap: 10px; flex: 1; }
+.party-win {
+  background: var(--panel-bg); border: 3px solid var(--panel-border);
+  padding: 8px 12px; min-width: 150px; flex: 1; border-radius: 4px;
+}
+.party-win .pname { font-weight: bold; font-size: 14px; }
+.party-win.downed { opacity: 0.5; }
+.party-win .stat { display: flex; justify-content: space-between; font-size: 13px; margin-top: 3px; }
+.party-win .num { font-variant-numeric: tabular-nums; }
+.party-win.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+#battle-menu { width: 280px; }
+.bar { height: 6px; background: #333; border-radius: 3px; margin-top: 2px; overflow: hidden; }
+.bar > span { display: block; height: 100%; }
+.bar.hp > span { background: var(--good); }
+.bar.pp > span { background: #5aa0e8; }
+
+/* ---- toast ---- */
+#toast-wrap { position: fixed; top: 14px; right: 16px; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+.toast {
+  background: var(--panel-bg); border: 2px solid var(--accent);
+  padding: 6px 12px; font-size: 13px; animation: toastin 0.2s ease;
+}
+@keyframes toastin { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; } }
+
+.kbd { display: inline-block; border: 1px solid #aaa; border-radius: 3px; padding: 0 5px; font-size: 11px; opacity: 0.8; }
+.row { display: flex; gap: 10px; }
+.col { flex: 1; }
+.muted { opacity: 0.7; }
+.gold { color: var(--accent); }
+button.txt { pointer-events: auto; background: none; border: none; color: inherit; font: inherit; cursor: pointer; }
