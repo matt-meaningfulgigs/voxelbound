@@ -18,7 +18,8 @@ export class SurfaceCover {
   private active = new Map<number, number>();
   private regrowTicks: number;
   /** Bumped whenever the visible state changes, so renderers can rebuild lazily. */
-  dirty = true;
+  dirty = false;
+  private dirtyCells = new Set<number>();
 
   constructor(field: TerrainField, regrowTicks = 220) {
     this.w = field.w;
@@ -48,7 +49,7 @@ export class SurfaceCover {
         if (!this.eligible[i]) continue;
         if (this.state[i] !== dirVal) {
           this.state[i] = dirVal;
-          this.dirty = true;
+          this.markDirty(i);
         }
         this.active.set(i, this.regrowTicks);
       }
@@ -63,10 +64,32 @@ export class SurfaceCover {
       if (nt <= 0) {
         this.state[i] = 0;
         this.active.delete(i);
-        this.dirty = true;
+        this.markDirty(i);
       } else {
         this.active.set(i, nt);
       }
     }
+  }
+
+  /** Pull the set of cells whose cover visuals changed since the last pull. */
+  takeDirtyCells(): number[] {
+    if (this.dirtyCells.size === 0) {
+      this.dirty = false;
+      return [];
+    }
+    const out = [...this.dirtyCells];
+    this.dirtyCells.clear();
+    this.dirty = false;
+    return out;
+  }
+
+  clearDirty(): void {
+    this.dirtyCells.clear();
+    this.dirty = false;
+  }
+
+  private markDirty(i: number): void {
+    this.dirty = true;
+    this.dirtyCells.add(i);
   }
 }

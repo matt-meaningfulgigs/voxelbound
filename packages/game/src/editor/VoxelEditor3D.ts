@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { VOXEL_UNIT } from '@voxelbound/shared';
 import type { EditorDoc } from './voxelDoc';
 import { vkey } from './voxelDoc';
 
@@ -17,7 +18,7 @@ export class VoxelEditor3D {
   private rig = new THREE.Group();
   private inst: THREE.InstancedMesh | null = null;
   private coords: Array<[number, number, number]> = [];
-  private cube = new THREE.BoxGeometry(1, 1, 1);
+  private cube = new THREE.BoxGeometry(VOXEL_UNIT, VOXEL_UNIT, VOXEL_UNIT);
   private cubeMat = new THREE.MeshLambertMaterial({ vertexColors: false });
   private floor: THREE.Mesh;
   private cursor: THREE.LineSegments;

@@ -14,8 +14,8 @@ export function ticksPerAnimFrame(cfg: TimingConfig): number {
 export const CameraConfigSchema = z.object({
   projection: z.enum(['orthographic', 'perspective']).default('orthographic'),
   pitchDeg: z.number().default(35),
-  yawDeg: z.number().default(45),
-  viewHeightVoxels: z.number().default(144),
+  yawDeg: z.number().default(0),
+  viewHeightVoxels: z.number().default(150),
   fovDeg: z.number().default(50),
   followDeadzone: z.number().default(8),
   followSmoothing: z.number().default(0.12),

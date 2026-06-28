@@ -29,6 +29,7 @@ import { buildTerrainMeshes } from '../render/ChunkMesher';
 import { GrassLayer } from '../render/GrassLayer';
 import { NavGrid, findPath, type NavPoint } from '../systems/Pathfinding';
 import { WaterFeatures, type RiverPoint } from '../systems/WaterFeatures';
+import { EmitterEffects } from '../systems/EmitterEffects';
 import { EditorWorld } from '../state/EditorWorld';
 
 const SWAY = ['sway_0', 'sway_1', 'sway_2'];
@@ -119,8 +120,8 @@ export class OverworldScene implements Scene {
   private actors: Actor[] = [];
   private player!: Actor;
   private animatedProps: AnimatedProp[] = [];
-  private waterMeshes: THREE.Mesh[] = [];
   private water: WaterFeatures | null = null;
+  private emitters: EmitterEffects | null = null;
   private riverPath: RiverPoint[] = [];
   private staticProps: VoxelMesh[] = [];
   private staticContainers: THREE.Group[] = [];
@@ -205,9 +206,10 @@ export class OverworldScene implements Scene {
     this.doors = [];
     this.encounterZone = null;
     this.talkingActor = null;
-    this.waterMeshes = [];
     this.water?.dispose();
     this.water = null;
+    this.emitters?.dispose();
+    this.emitters = null;
     this.riverPath = [];
     this.grass?.dispose();
     this.grass = null;
@@ -246,7 +248,35 @@ export class OverworldScene implements Scene {
     this.tick();
   }
   updateRender(dt: number): void {
-    this.water?.update(dt);
+    if (!this.isInterior && this.terrainField) this.applyViewCulling();
+    this.water?.render(dt);
+    this.emitters?.render(dt);
+  }
+
+  /** Hide props/NPCs and tighten water sim to the visible footprint. */
+  private applyViewCulling(): void {
+    const cam = this.engine.camera;
+    const r = cam.viewCullRadius();
+    this.water?.setViewCullRadius(r);
+    this.emitters?.setViewCullRadius(r);
+
+    const t = this.engine.world.stores.transform.get(this.player.id);
+    if (t) this.emitters?.setViewCenter(t.x, t.z);
+
+    for (const c of this.staticContainers) {
+      c.visible = cam.containsXZ(c.position.x, c.position.z);
+    }
+    for (const p of this.animatedProps) {
+      p.container.visible = cam.containsXZ(p.container.position.x, p.container.position.z);
+    }
+    for (const a of this.actors) {
+      if (a.isPlayer) {
+        a.container.visible = true;
+        continue;
+      }
+      const at = this.engine.world.stores.transform.get(a.id);
+      a.container.visible = at ? cam.containsXZ(at.x, at.z) : false;
+    }
   }
 
   private resolveSpawn(mapId: string): { x: number; z: number } {
@@ -281,8 +311,12 @@ export class OverworldScene implements Scene {
     this.engine.gs.data.playTimeMs += 1000 / this.engine.settings.timing.worldTickRate;
     this.engine.camera.follow(t.x, this.groundHeight(t.x, t.z), t.z, this.engine.settings.camera.followSmoothing);
 
+    this.water?.step(1 / this.engine.settings.timing.worldTickRate, { x: t.x, z: t.z });
+    if (this.terrainField) {
+      this.water?.setViewCullRadius(this.engine.camera.viewCullRadius());
+    }
     this.cover?.tick();
-    this.grass?.update(t.x, t.z);
+    this.grass?.update();
 
     this.checkDoors(t);
     this.checkEncounter(t);
@@ -312,13 +346,8 @@ export class OverworldScene implements Scene {
       else t.facing = axis.z > 0 ? 2 : 0;
       animation.setState(an, 'walk', a.archetype);
       this.cover?.stamp(t.x, t.z, t.facing);
-      // splash when wading through the shallows / river
-      if (this.water && this.terrainField) {
-        const gh = heightBilinear(this.terrainField, t.x, t.z);
-        if (gh < this.seaLevel + 0.4) {
-          this.water.wade(t.x, this.seaLevel, t.z, 1 / this.engine.settings.timing.worldTickRate);
-        }
-      }
+      // splash / ripple when wading through any live water (self-gates if dry)
+      this.water?.wade(t.x, t.z, 1 / this.engine.settings.timing.worldTickRate);
     } else {
       animation.setState(an, 'idle', a.archetype);
     }
@@ -562,12 +591,16 @@ export class OverworldScene implements Scene {
     }
     const sx = hw * 0.7;
     const sz = hd * 0.7;
+    const pass = (px: number, pz: number): boolean => {
+      if (walkableAt(f, px, pz)) return true;
+      return (this.water?.depthAt(px, pz) ?? 0) >= 0.35;
+    };
     return (
-      !walkableAt(f, x, z) ||
-      !walkableAt(f, x + sx, z + sz) ||
-      !walkableAt(f, x - sx, z + sz) ||
-      !walkableAt(f, x + sx, z - sz) ||
-      !walkableAt(f, x - sx, z - sz)
+      !pass(x, z) ||
+      !pass(x + sx, z + sz) ||
+      !pass(x - sx, z + sz) ||
+      !pass(x + sx, z - sz) ||
+      !pass(x - sx, z - sz)
     );
   }
 
@@ -607,10 +640,6 @@ export class OverworldScene implements Scene {
       p.meshes[idx]!.group.visible = true;
       p.current = idx;
     }
-    const blues = [0x3f8fd0, 0x4a9bdb, 0x3a86c8];
-    this.waterMeshes.forEach((w, i) => {
-      (w.material as THREE.MeshLambertMaterial).color.setHex(blues[(step + i) % blues.length]!);
-    });
   }
 
   // -- terrain helpers ------------------------------------------------------
@@ -732,10 +761,29 @@ export class OverworldScene implements Scene {
 
     this.buildTownTerrain();
 
-    // fountain + plaza lamps
-    this.placeProp('fountain', CX, CZ);
-    this.solids.push({ x0: CX - 9, z0: CZ - 9, x1: CX + 9, z1: CZ + 9 });
-    this.addFountainWater(CX, CZ);
+    // Central pagan effigy — burning wicker man with voxel fire + smoke
+    this.placeProp('burning_effigy', CX, CZ);
+    const effigy = this.engine.animation.getModel('burning_effigy');
+    if (effigy) {
+      const effigyHalf = Math.max(effigy.bounds[0], effigy.bounds[2]) / 2 - 3;
+      this.solids.push({ x0: CX - effigyHalf, z0: CZ - effigyHalf, x1: CX + effigyHalf, z1: CZ + effigyHalf });
+      const baseY = this.groundHeight(CX, CZ);
+      this.emitters?.addPropSources(effigy, 'default', CX, baseY, CZ, 0);
+    }
+
+    // Fountain moved to east plaza — still seeds dynamic water
+    const fx = CX + 88;
+    const fz = CZ - 42;
+    this.placeProp('fountain', fx, fz);
+    this.solids.push({ x0: fx - 2.5, z0: fz - 2.5, x1: fx + 2.5, z1: fz + 2.5 });
+    this.addFountainWater(fx, fz);
+    const fountainModel = this.engine.animation.getModel('fountain');
+    if (fountainModel) {
+      const fBase = this.groundHeight(fx, fz);
+      this.water?.addPropWaterEmitters(fountainModel, 'default', fx, fBase, fz, 0);
+    }
+    this.seedWorldWater();
+    if (this.terrainField) this.water?.markTerrainWalkable(this.terrainField);
     for (const [dx, dz] of [[-52, -52], [52, -52], [-52, 52], [52, 52]] as const) this.placeProp('lamp', CX + dx, CZ + dz);
 
     // procedural town buildings — every one is enterable
@@ -824,50 +872,29 @@ export class OverworldScene implements Scene {
       this.terrain.push(m);
     }
 
-    // Live voxel water: fountain spray, drifting river foam, waterfall droplets.
-    this.water = new WaterFeatures(this.engine.threeScene);
-    if (this.riverPath.length) this.water.setRiver(this.riverPath);
+    // Live shallow-water fluid sim: fountain, river and lake flow/ripple/splash.
+    this.water = new WaterFeatures(this.engine.threeScene, field);
+    this.emitters = new EmitterEffects(this.engine.threeScene);
 
-    // displaceable grass cover (lays down as actors walk, then regrows)
     this.cover = new SurfaceCover(field);
-    this.grass = new GrassLayer(this.engine.threeScene, field, this.cover);
-    this.grass.update(this.cx, this.cz);
-
-    // One translucent sea surface at sea level. Higher land occludes it, so it
-    // only shows through in lakes, the ocean ring and basins. Phase 2 replaces
-    // this with the real fluid sim + shorelines + fountain flow.
-    const sea = new THREE.Mesh(
-      new THREE.PlaneGeometry(this.mapW, this.mapD),
-      new THREE.MeshLambertMaterial({ color: 0x3f8fd0, transparent: true, opacity: 0.8 }),
-    );
-    sea.rotation.x = -Math.PI / 2;
-    sea.position.set(this.mapW / 2, this.seaLevel, this.mapD / 2);
-    this.engine.threeScene.add(sea);
-    this.terrain.push(sea);
-    this.waterMeshes.push(sea);
+    this.grass = new GrassLayer(this.engine.threeScene, field, this.cover, this.engine.gs.data.worldSeed, {
+      townCenterX: this.cx,
+      townCenterZ: this.cz,
+      townRadius: 115,
+    });
   }
 
-  /** Animated water for the plaza fountain: two pools and a bobbing jet. */
+  /** Raised plaza fountain: simulated basin + bowl pools, spout and spray. */
   private addFountainWater(cx: number, cz: number): void {
     const baseY = this.groundHeight(cx, cz);
-    const pool = (r: number, y: number): THREE.Mesh => {
-      const m = new THREE.Mesh(
-        new THREE.CircleGeometry(r, 24),
-        new THREE.MeshLambertMaterial({ color: 0x4a9bdb, transparent: true, opacity: 0.85 }),
-      );
-      m.rotation.x = -Math.PI / 2;
-      m.position.set(cx, y, cz);
-      this.engine.threeScene.add(m);
-      this.terrain.push(m);
-      this.waterMeshes.push(m);
-      return m;
-    };
-    pool(6.4, baseY + 2.6); // basin
-    pool(2.6, baseY + 6.4); // upper bowl
+    this.water?.seedFountain(cx, cz, baseY);
+  }
 
-    // Real voxel spout: jets little water cubes up out of the top bowl that
-    // arc out under gravity and fall back into the basin.
-    this.water?.addFountainAt(cx, cz, baseY + 6.8, baseY + 2.7);
+  /** River channel + every submerged column (ocean, lakes, coastlines). */
+  private seedWorldWater(): void {
+    if (!this.terrainField) return;
+    if (this.riverPath.length) this.water?.seedRiver(this.riverPath);
+    this.water?.seedOpenWater(this.seaLevel, this.terrainField);
   }
 
   /** Flatten a foundation pad + walkable doorway apron under each building. */
@@ -924,7 +951,7 @@ export class OverworldScene implements Scene {
           if (dist <= half) {
             field.height[i] = Math.round(bedY - 1); // sunken channel floor
             field.material[i] = TerrainMaterial.Stone; // wet riverbed
-            field.walkable[i] = 0; // deep water blocks
+            field.walkable[i] = 1; // wadeable stream
           } else if (dist <= half + bank) {
             const target = Math.round(bedY + 2);
             if (field.height[i]! < target) {
@@ -1082,13 +1109,6 @@ export class OverworldScene implements Scene {
       const z = 24 + rng.next() * (this.mapD - 48);
       if (!this.isOpen(x, z, 5)) continue;
       this.placeProp(rng.chance(0.65) ? 'bush' : 'rock', x, z);
-    }
-    // tall grass-tuft accents in the meadow (the GrassLayer already carpets the
-    // ground with dense blades, so these are sparse highlights, not a full field)
-    for (let i = 0; i < 40; i++) {
-      const x = 366 + rng.next() * 130;
-      const z = 206 + rng.next() * 148;
-      if (!this.terrainField || walkableAt(this.terrainField, x, z)) this.placeProp('grass_tile', x, z, 0, true);
     }
     // flowers dotted around town
     for (let i = 0; i < 70; i++) {
@@ -1251,7 +1271,7 @@ export class OverworldScene implements Scene {
     const { world, animation } = this.engine;
     const id = world.createEntity();
     world.stores.transform.set(id, { x: opts.x, y: 0, z: opts.z, facing: opts.facing });
-    world.stores.movement.set(id, { speed: opts.isPlayer ? 0.16 : 0.05, runMultiplier: 1.9, vx: 0, vz: 0, moving: false });
+    world.stores.movement.set(id, { speed: opts.isPlayer ? 0.45 : 0.05, runMultiplier: opts.isPlayer ? 2.1 : 1.9, vx: 0, vz: 0, moving: false });
     world.stores.animation.set(id, { currentState: 'idle', clipName: 'idle', frameIndex: 0, animStepSeen: -1, randomIdleTimer: 0 });
     world.stores.voxelModel.set(id, { modelId: opts.modelId });
 

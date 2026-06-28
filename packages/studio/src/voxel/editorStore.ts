@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { VoxelModel, AnimationClip, VoxelEntry } from '@voxelbound/shared';
+import type { VoxelModel, AnimationClip, VoxelEntry, EmitterKind } from '@voxelbound/shared';
 
 export type VoxelKind = VoxelModel['kind'];
 export type Tool = 'pencil' | 'eraser' | 'fill' | 'eyedropper';
@@ -10,6 +10,7 @@ export interface EditorDoc {
   kind: VoxelKind;
   bounds: [number, number, number];
   palette: string[];
+  paletteEmitters?: EmitterKind[];
   pivot: [number, number, number];
   animations: Record<string, AnimationClip>;
   frames: Record<string, Map<string, number>>;
@@ -55,6 +56,7 @@ export function docFromModel(m: VoxelModel): EditorDoc {
     kind: m.kind,
     bounds: [...m.bounds] as [number, number, number],
     palette: [...m.palette],
+    paletteEmitters: m.paletteEmitters ? [...m.paletteEmitters] : undefined,
     pivot: [...m.pivot] as [number, number, number],
     animations: structuredClone(m.animations),
     frames,
@@ -76,6 +78,7 @@ export function modelFromDoc(d: EditorDoc): VoxelModel {
     kind: d.kind,
     bounds: [...d.bounds] as [number, number, number],
     palette: [...d.palette],
+    paletteEmitters: d.paletteEmitters ? [...d.paletteEmitters] : undefined,
     pivot: [...d.pivot] as [number, number, number],
     animations: structuredClone(d.animations),
     frames,
@@ -119,6 +122,7 @@ interface EditorState {
   setBounds: (b: [number, number, number]) => void;
   setPivot: (p: [number, number, number]) => void;
   setPaletteColor: (i: number, hex: string) => void;
+  setPaletteEmitter: (i: number, kind: EmitterKind) => void;
   addPaletteColor: () => void;
 
   addClip: (name: string) => void;
@@ -272,8 +276,21 @@ export const useEditor = create<EditorState>((set, get) => ({
       palette[i] = hex;
       return { doc: { ...s.doc, palette }, bump: s.bump + 1 };
     }),
+  setPaletteEmitter: (i, kind) =>
+    set((s) => {
+      const emitters = [...(s.doc.paletteEmitters ?? s.doc.palette.map(() => 'solid' as const))];
+      while (emitters.length < s.doc.palette.length) emitters.push('solid');
+      emitters[i] = kind;
+      return { doc: { ...s.doc, paletteEmitters: emitters } };
+    }),
   addPaletteColor: () =>
-    set((s) => ({ doc: { ...s.doc, palette: [...s.doc.palette, '#ffffff'] } })),
+    set((s) => ({
+      doc: {
+        ...s.doc,
+        palette: [...s.doc.palette, '#ffffff'],
+        paletteEmitters: [...(s.doc.paletteEmitters ?? s.doc.palette.map(() => 'solid' as const)), 'solid'],
+      },
+    })),
 
   addClip: (name) =>
     set((s) => {

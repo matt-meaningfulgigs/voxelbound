@@ -137,21 +137,45 @@ function buildChunk(field: TerrainField, x0: number, z0: number, cs: number, flo
   return geo;
 }
 
-/** Build one mesh per chunk for the whole terrain field. */
-export function buildTerrainMeshes(field: TerrainField, chunkSize = DEFAULT_CHUNK): THREE.Mesh[] {
-  // floor for skirts: a bit below the lowest column
+/** Lowest skirt floor for side faces. */
+export function terrainFloorY(field: TerrainField): number {
   let minH = Infinity;
   for (let i = 0; i < field.height.length; i++) if (field.height[i]! < minH) minH = field.height[i]!;
-  const floorY = minH - 2;
+  return minH - 2;
+}
+
+/** Build a single terrain chunk mesh (lazy streaming). */
+export function buildTerrainChunkMesh(
+  field: TerrainField,
+  chunkX: number,
+  chunkZ: number,
+  chunkSize = DEFAULT_CHUNK,
+  floorY?: number,
+): THREE.Mesh | null {
+  const x0 = chunkX * chunkSize;
+  const z0 = chunkZ * chunkSize;
+  if (x0 >= field.w || z0 >= field.d) return null;
+  const fy = floorY ?? terrainFloorY(field);
+  const geo = buildChunk(field, x0, z0, chunkSize, fy);
+  if (!geo) return null;
+  geo.computeBoundingBox();
+  const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = true;
+  mesh.userData.chunkX = chunkX;
+  mesh.userData.chunkZ = chunkZ;
+  return mesh;
+}
+
+/** Build one mesh per chunk for the whole terrain field. */
+export function buildTerrainMeshes(field: TerrainField, chunkSize = DEFAULT_CHUNK): THREE.Mesh[] {
+  const floorY = terrainFloorY(field);
 
   const meshes: THREE.Mesh[] = [];
   for (let z0 = 0; z0 < field.d; z0 += chunkSize) {
     for (let x0 = 0; x0 < field.w; x0 += chunkSize) {
-      const geo = buildChunk(field, x0, z0, chunkSize, floorY);
-      if (!geo) continue;
-      const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
-      const mesh = new THREE.Mesh(geo, mat);
-      meshes.push(mesh);
+      const mesh = buildTerrainChunkMesh(field, x0 / chunkSize, z0 / chunkSize, chunkSize, floorY);
+      if (mesh) meshes.push(mesh);
     }
   }
   return meshes;

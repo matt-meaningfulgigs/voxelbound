@@ -1,5 +1,5 @@
 import type { GameEngine } from '@voxelbound/engine';
-import { allModels, ITEMS, ENEMIES, type VoxelModel } from '@voxelbound/shared';
+import { allModels, ITEMS, ENEMIES, type VoxelModel, type EmitterKind } from '@voxelbound/shared';
 import { el, clear } from '../game/dom';
 import { VoxelEditor3D } from './VoxelEditor3D';
 import { SliceEditor, type SliceTool } from './SliceEditor';
@@ -338,6 +338,7 @@ export class EditorOverlay {
     const add = el('button', { class: 'ed-swatch add', textContent: '+' });
     add.addEventListener('click', () => {
       this.doc.palette.push('#ffffff');
+      if (this.doc.paletteEmitters) this.doc.paletteEmitters.push('solid');
       this.buildVoxelSidebar();
     });
     grid.append(add);
@@ -354,6 +355,24 @@ export class EditorOverlay {
     });
     editRow.append(colorIn, el('span', { class: 'ed-help', textContent: `slot #${this.activeColor}` }));
     block.append(editRow);
+
+    const emitRow = el('div', { class: 'ed-pal-edit' });
+    if (!this.doc.paletteEmitters) {
+      this.doc.paletteEmitters = this.doc.palette.map(() => 'solid' as const);
+    }
+    while (this.doc.paletteEmitters.length < this.doc.palette.length) {
+      this.doc.paletteEmitters.push('solid');
+    }
+    const emitSel = el('select', { class: 'ed-in' }) as HTMLSelectElement;
+    for (const kind of ['solid', 'fire', 'smoke', 'water'] as const) {
+      emitSel.append(el('option', { value: kind, textContent: kind }));
+    }
+    emitSel.value = this.doc.paletteEmitters[this.activeColor] ?? 'solid';
+    emitSel.addEventListener('change', () => {
+      this.doc.paletteEmitters![this.activeColor] = emitSel.value as EmitterKind;
+    });
+    emitRow.append(el('span', { class: 'ed-help', textContent: 'Emitter' }), emitSel);
+    block.append(emitRow);
     return block;
   }
 
@@ -529,7 +548,7 @@ export class EditorOverlay {
       for (const m of lib) og.append(el('option', { value: m.id, textContent: m.id }));
       sel.append(og);
     }
-    const placeable = allModels.filter((m) => m.kind === 'prop' || m.kind === 'tile' || /^(tree|pine|house|flower|bush|rock|fence|sign|lamp|fountain)/.test(m.id));
+    const placeable = allModels.filter((m) => m.kind === 'prop' || m.kind === 'tile' || /^(tree|pine|house|flower|bush|rock|fence|sign|lamp|fountain|burning_effigy)/.test(m.id));
     const og2 = el('optgroup', { label: 'Built-in' } as never) as HTMLOptGroupElement;
     for (const m of placeable) og2.append(el('option', { value: m.id, textContent: m.id }));
     sel.append(og2);

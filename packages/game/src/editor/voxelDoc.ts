@@ -1,4 +1,4 @@
-import type { VoxelModel, AnimationClip, VoxelEntry } from '@voxelbound/shared';
+import type { VoxelModel, AnimationClip, VoxelEntry, EmitterKind } from '@voxelbound/shared';
 
 export type VoxelKind = VoxelModel['kind'];
 
@@ -8,6 +8,8 @@ export interface EditorDoc {
   kind: VoxelKind;
   bounds: [number, number, number];
   palette: string[];
+  /** Parallel to palette — emission / shader behavior per slot. */
+  paletteEmitters?: EmitterKind[];
   pivot: [number, number, number];
   animations: Record<string, AnimationClip>;
   frames: Record<string, Map<string, number>>;
@@ -53,6 +55,7 @@ export function docFromModel(m: VoxelModel): EditorDoc {
     kind: m.kind,
     bounds: [...m.bounds] as [number, number, number],
     palette: [...m.palette],
+    paletteEmitters: m.paletteEmitters ? [...m.paletteEmitters] : undefined,
     pivot: [...m.pivot] as [number, number, number],
     animations: structuredClone(m.animations),
     frames,
@@ -74,6 +77,7 @@ export function modelFromDoc(d: EditorDoc): VoxelModel {
     kind: d.kind,
     bounds: [...d.bounds] as [number, number, number],
     palette: [...d.palette],
+    paletteEmitters: d.paletteEmitters ? [...d.paletteEmitters] : undefined,
     pivot: [...d.pivot] as [number, number, number],
     animations: structuredClone(d.animations),
     frames,

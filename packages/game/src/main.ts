@@ -13,7 +13,6 @@ app.appendChild(canvas);
 
 const settings = structuredClone(DEFAULT_WORLD_SETTINGS) as unknown as WorldSettings;
 settings.camera.pitchDeg = 40;
-settings.camera.viewHeightVoxels = 200;
 
 const engine = new GameEngine({ canvas, settings });
 engine.registerContent(allModels, allArchetypes);

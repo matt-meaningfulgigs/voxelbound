@@ -1,5 +1,6 @@
 import type { Archetype, VoxelModel, VoxelEntry } from './voxelModel';
 import { Rng, hashSeed } from './game/worldgen/noise';
+import { burningEffigyModel } from './burningEffigy';
 
 /** Fill an inclusive voxel box with a palette index. */
 export function box(
@@ -463,6 +464,7 @@ export const fountainModel: VoxelModel = {
   kind: 'prop',
   bounds: [16, 8, 16],
   palette: ['#b8b4ac', '#86827a', '#4aa6e0'],
+  paletteEmitters: ['solid', 'solid', 'water'],
   pivot: [7, 0, 7],
   animations: {},
   frames: {
@@ -839,6 +841,7 @@ export const allModels: VoxelModel[] = [
   ...houseModels,
   ...enemyModels,
   fountainModel,
+  burningEffigyModel,
   ...flowerModels,
   bushModel,
   rockModel,

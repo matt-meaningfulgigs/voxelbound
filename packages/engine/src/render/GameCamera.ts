@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { CameraConfig, RenderConfig, WorldSettings } from '@voxelbound/shared';
+import { computeViewCullRadius, isInsideViewCull } from './viewCull';
 
 export class GameCamera {
   readonly camera: THREE.OrthographicCamera | THREE.PerspectiveCamera;
@@ -77,6 +78,24 @@ export class GameCamera {
       this.target.z + Math.cos(yaw) * Math.cos(pitch) * dist,
     );
     this.camera.lookAt(this.target);
+  }
+
+  /** World X/Z the camera follows (player). */
+  viewCenterX(): number {
+    return this.target.x;
+  }
+  viewCenterZ(): number {
+    return this.target.z;
+  }
+
+  /** Ground radius currently visible — use to cull off-screen sim/render. */
+  viewCullRadius(margin = 1.02): number {
+    const aspect = this.viewportH > 0 ? this.viewportW / this.viewportH : 16 / 9;
+    return computeViewCullRadius(this.config, aspect, margin);
+  }
+
+  containsXZ(x: number, z: number, margin = 1.02): boolean {
+    return isInsideViewCull(x, z, this.target.x, this.target.z, this.viewCullRadius(margin));
   }
 }
 

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { VoxelModel } from '@voxelbound/shared';
 import { voxelsFromFrame } from '@voxelbound/shared';
+import { unitVoxelGeometry, voxelCenter } from './voxelGeometry';
 
 const _matrix = new THREE.Matrix4();
 const _color = new THREE.Color();
@@ -13,7 +14,7 @@ export class VoxelMesh {
   private material: THREE.MeshLambertMaterial | THREE.MeshBasicMaterial;
 
   constructor(bevel = 0.05, unlit = false) {
-    this.geometry = new THREE.BoxGeometry(1, 1, 1);
+    this.geometry = unitVoxelGeometry();
     if (bevel > 0) {
       // slight scale for softer look
     }
@@ -56,7 +57,8 @@ export class VoxelMesh {
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 
     visible.forEach((v, i) => {
-      _dummy.position.set(v.x + 0.5, v.y + 0.5, v.z + 0.5);
+      const c = voxelCenter(v.x, v.y, v.z);
+      _dummy.position.copy(c);
       _dummy.updateMatrix();
       this.mesh!.setMatrixAt(i, _dummy.matrix);
       _color.setHex(v.color);

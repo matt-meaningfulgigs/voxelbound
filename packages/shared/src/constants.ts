@@ -1,5 +1,5 @@
-export const VOXEL_UNIT = 1;
-export const DEFAULT_VIEW_HEIGHT_VOXELS = 144;
+export const VOXEL_UNIT = 1; // canonical world voxel edge length — see voxelUnit.ts
+export const DEFAULT_VIEW_HEIGHT_VOXELS = 150;
 export const DEFAULT_PALETTE_SIZE = 32;
 export const TILE_FOOTPRINT = 16;
 
@@ -13,7 +13,7 @@ export const DEFAULT_WORLD_SETTINGS = {
   camera: {
     projection: 'orthographic' as const,
     pitchDeg: 35,
-    yawDeg: 45,
+    yawDeg: 0,
     viewHeightVoxels: DEFAULT_VIEW_HEIGHT_VOXELS,
     fovDeg: 50,
     followDeadzone: 8,

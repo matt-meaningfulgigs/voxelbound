@@ -1,377 +1,584 @@
 import * as THREE from 'three';
+import {
+  VOXEL_UNIT,
+  enforceVoxelScale,
+  updateDominantCell,
+  type TerrainField,
+  type VoxelModel,
+  worldEmittersFromPlacement,
+} from '@voxelbound/shared';
+import { unitVoxelGeometry, voxelCenter } from '../render/voxelGeometry';
+import { groupXzClusters, supervoxelScale } from '../render/supervoxelClusters';
+import { FluidField, MIN_WATER_LAYER } from './FluidField';
 
-/**
- * Voxel water dynamics: a single instanced pool of little water cubes used for
- * the fountain spray, waterfall droplets and footstep splashes, plus drifting
- * "foam" voxels that ride a river's arc-length path so the current is visible,
- * and a translucent surface ribbon for the river/waterfall body.
- *
- * Everything is driven per render-frame from {@link update} so motion is smooth
- * (independent of the coarse world-tick clock used by gameplay).
- */
-
+/** A point on the river centreline: world position, surface height, half-width. */
 export interface RiverPoint {
   x: number;
   z: number;
-  /** Water-surface height at this point. */
   y: number;
-  /** Channel half-width in world units. */
   half: number;
 }
 
-type Mode = 0 | 1; // 0 = free (gravity), 1 = foam (rides the path)
+/**
+ * Live water physics ({@link FluidField}) + Lego Movie-style voxel display.
+ *
+ * **One system for all water** (stream, lake, fountain basin): each wet column
+ * owns a surface particle at continuous (x,y,z). The shallow-water sim drives
+ * depth, velocity, and sub-cell drift. Spray arcs use the same particle pool.
+ *
+ * **Render:** round every particle to the voxel grid; merge XZ-connected bodies
+ * into blue liquid; isolated cells are white splash.
+ */
 
-interface Particle {
+const GRAV = 46;
+const WATER_RENDER_CAP = 32768;
+const SPRAY_CAP = 768;
+const WAKE_MARGIN = 1.08;
+
+/** Shared water surface tint for all dynamic voxels. */
+export const WATER_SURFACE_COLOR = 0x3885d1;
+export const WATER_SURFACE_OPACITY = 0.8;
+
+const COLOR_LIQUID = new THREE.Color(WATER_SURFACE_COLOR);
+/** Foam / airborne spray — lighter but still blue-tinted, not opaque white. */
+const COLOR_SPLASH = new THREE.Color(0.66, 0.82, 0.96);
+
+interface Droplet {
   active: boolean;
-  mode: Mode;
   x: number;
   y: number;
   z: number;
-  // free
   vx: number;
   vy: number;
   vz: number;
   floorY: number;
-  // foam
-  s: number;
-  lateral: number;
-  speed: number;
-  // shared
   life: number;
   maxLife: number;
-  size: number;
-  r: number;
-  g: number;
-  b: number;
+  render: { x: number; y: number; z: number };
 }
 
-const GRAV = 46; // world units / s^2
+interface VisualCell {
+  gx: number;
+  gy: number;
+  gz: number;
+  bulk: number;
+  spray: number;
+  liquid: boolean;
+}
+
+interface Fountain {
+  x: number;
+  z: number;
+  rimY: number;
+  acc: number;
+}
+
+interface WaterEmitter {
+  x: number;
+  y: number;
+  z: number;
+  acc: number;
+}
+
+interface Waterfall {
+  x: number;
+  z: number;
+  topY: number;
+  baseY: number;
+  half: number;
+  acc: number;
+}
+
+/** Bulk surface bodies merge on XZ; spray stays white unless it sits on bulk liquid. */
+export function classifyLiquidClusters(cells: Map<string, VisualCell>): void {
+  const byXz = new Map<string, string[]>();
+  for (const [key, c] of cells) {
+    const xz = `${c.gx},${c.gz}`;
+    const list = byXz.get(xz);
+    if (list) list.push(key);
+    else byXz.set(xz, [key]);
+  }
+
+  const xzNeighbors: ReadonlyArray<[number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const visited = new Set<string>();
+
+  for (const startKey of cells.keys()) {
+    if (visited.has(startKey)) continue;
+    const start = cells.get(startKey)!;
+    const cluster: VisualCell[] = [];
+    const queue = [startKey];
+    visited.add(startKey);
+
+    while (queue.length) {
+      const key = queue.pop()!;
+      const c = cells.get(key)!;
+      cluster.push(c);
+      for (const [dx, dz] of xzNeighbors) {
+        const nkeys = byXz.get(`${c.gx + dx},${c.gz + dz}`);
+        if (!nkeys) continue;
+        for (const nk of nkeys) {
+          if (visited.has(nk)) continue;
+          visited.add(nk);
+          queue.push(nk);
+        }
+      }
+    }
+
+    const bulkCells = cluster.filter((c) => c.bulk > 0);
+    const totalBulk = bulkCells.reduce((n, c) => n + c.bulk, 0);
+    const liquid = bulkCells.length >= 2 || totalBulk >= 2;
+    for (const c of cluster) {
+      if (c.bulk > 0) c.liquid = liquid;
+    }
+  }
+}
+
+function cellKey(gx: number, gy: number, gz: number): string {
+  return `${gx},${gy},${gz}`;
+}
 
 export class WaterFeatures {
   private scene: THREE.Scene;
-  private mesh: THREE.InstancedMesh;
-  private cap: number;
-  private parts: Particle[] = [];
+  private field: FluidField;
+
+  /** All simulated water in view — ocean, lake, river, fountain. */
+  private waterMesh: THREE.InstancedMesh;
+  private drops: Droplet[] = [];
   private next = 0;
   private dummy = new THREE.Matrix4();
   private q = new THREE.Quaternion();
   private v = new THREE.Vector3();
   private sc = new THREE.Vector3();
   private col = new THREE.Color();
-  private elapsed = 0;
+  private cellScratch = new Map<string, VisualCell>();
 
-  // fountains: spout emitters
-  private fountains: Array<{ x: number; y: number; z: number; basinY: number; acc: number }> = [];
+  private fountains: Fountain[] = [];
+  private waterEmitters: WaterEmitter[] = [];
+  private waterfalls: Waterfall[] = [];
+  private wadeAcc = 0;
+  private player: { x: number; z: number } | null = null;
+  private viewCullR = 120;
 
-  // river path (arc-length parameterised)
-  private river: {
-    pts: RiverPoint[];
-    cum: number[];
-    total: number;
-    drops: Array<{ x: number; y: number; z: number; baseY: number; half: number }>;
-    foamAcc: number;
-    dropAcc: number;
-  } | null = null;
-  private ribbons: THREE.Mesh[] = [];
+  /** Debug counters for overlay / tests. */
+  readonly stats = {
+    sprayActive: 0,
+    waterInstances: 0,
+    waterEmitters: 0,
+  };
 
-  // throttle for footstep splashes
-  private splashAcc = 0;
-
-  constructor(scene: THREE.Scene, capacity = 640) {
+  constructor(scene: THREE.Scene, field: TerrainField) {
     this.scene = scene;
-    this.cap = capacity;
-    const geo = new THREE.BoxGeometry(1, 1, 1);
-    const mat = new THREE.MeshLambertMaterial({ transparent: true, opacity: 0.92 });
-    this.mesh = new THREE.InstancedMesh(geo, mat, capacity);
-    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.mesh.frustumCulled = false;
-    const colorAttr = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
-    this.mesh.instanceColor = colorAttr;
-    for (let i = 0; i < capacity; i++) {
-      this.parts.push({
-        active: false, mode: 0, x: 0, y: 0, z: 0,
-        vx: 0, vy: 0, vz: 0, floorY: 0,
-        s: 0, lateral: 0, speed: 0,
-        life: 0, maxLife: 1, size: 1, r: 0.6, g: 0.8, b: 1,
+    this.field = new FluidField(field);
+
+    const geo = unitVoxelGeometry();
+    const mat = this.createWaterMaterial();
+    this.waterMesh = new THREE.InstancedMesh(geo, mat, WATER_RENDER_CAP);
+    this.waterMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.waterMesh.instanceColor = new THREE.InstancedBufferAttribute(
+      new Float32Array(WATER_RENDER_CAP * 3).fill(1),
+      3,
+    );
+    this.waterMesh.frustumCulled = true;
+    this.waterMesh.renderOrder = 2;
+    this.waterMesh.count = 0;
+    this.scene.add(this.waterMesh);
+    for (let i = 0; i < SPRAY_CAP; i++) {
+      this.drops.push({
+        active: false, x: 0, y: 0, z: 0,
+        vx: 0, vy: 0, vz: 0, floorY: 0, life: 0, maxLife: 1,
+        render: { x: 0, y: 0, z: 0 },
       });
-      this.hide(i);
     }
-    this.mesh.instanceMatrix.needsUpdate = true;
-    this.scene.add(this.mesh);
+
+    const s = enforceVoxelScale(VOXEL_UNIT, VOXEL_UNIT, VOXEL_UNIT);
+    this.sc.set(s.x, s.y, s.z);
   }
 
-  // -- public configuration -------------------------------------------------
-
-  /** Register a fountain spout that continuously launches voxels upward. */
-  addFountainAt(x: number, z: number, spoutY: number, basinY: number): void {
-    this.fountains.push({ x, y: spoutY, z, basinY, acc: 0 });
+  private createWaterMaterial(): THREE.MeshBasicMaterial {
+    return new THREE.MeshBasicMaterial({
+      // White base; per-instance blue comes from setColorAt.
+      color: 0xffffff,
+      transparent: true,
+      opacity: WATER_SURFACE_OPACITY,
+      depthWrite: false,
+    });
   }
 
-  /**
-   * Define the river. Points are ordered upstream→downstream; steep drops
-   * between consecutive points become waterfalls (extra falling droplets +
-   * splash at the base). Also builds the translucent surface ribbon.
-   */
-  setRiver(pts: RiverPoint[]): void {
+  /** No-op — all water is dynamic; kept for call-site compatibility. */
+  finalizeStaticWater(): void {}
+
+  seedFountain(cx: number, cz: number, baseY: number): void {
+    const basinFloor = baseY + 1.8;
+    const basinRim = baseY + 4.5;
+    const bowlFloor = baseY + 5.2;
+    const bowlRim = baseY + 6.6;
+
+    const basin = this.field.seedDisc(cx, cz, 10, basinFloor);
+    this.field.fillTo(basin, basinRim - 0.3);
+    this.field.setDrain(basin, basinRim);
+
+    const bowl = this.field.seedDisc(cx, cz, 4.5, bowlFloor);
+    this.field.fillTo(bowl, bowlRim - 0.15);
+    this.field.setDrain(bowl, bowlRim);
+
+    this.field.addSource(cx, cz, 3.2, bowlRim);
+    this.field.markLive(basin);
+    this.field.markLive(bowl);
+    this.fountains.push({ x: cx, z: cz, rimY: bowlRim, acc: 0 });
+  }
+
+  /** Register water palette emitters from a placed prop (fountain spout, etc.). */
+  addPropWaterEmitters(
+    model: VoxelModel,
+    frameId: string,
+    worldX: number,
+    worldY: number,
+    worldZ: number,
+    facing: 0 | 1 | 2 | 3 = 0,
+  ): void {
+    const raw = worldEmittersFromPlacement(model, frameId, worldX, worldY, worldZ, facing).filter(
+      (e) => e.kind === 'water',
+    );
+    if (!raw.length) return;
+    const maxY = Math.max(...raw.map((e) => e.y));
+    const top = raw.filter((e) => e.y >= maxY - 0.6);
+    const step = Math.max(1, Math.floor(top.length / 3));
+    for (let i = 0; i < top.length; i += step) {
+      const e = top[i]!;
+      this.waterEmitters.push({ x: e.x, y: e.y, z: e.z, acc: 0 });
+      if (this.waterEmitters.length >= 3) break;
+    }
+  }
+
+  clearWaterEmitters(): void {
+    this.waterEmitters = [];
+  }
+
+  seedRiver(pts: RiverPoint[]): void {
     if (pts.length < 2) return;
-    const cum: number[] = [0];
-    for (let i = 1; i < pts.length; i++) {
-      const a = pts[i - 1]!;
-      const b = pts[i]!;
-      cum.push(cum[i - 1]! + Math.hypot(b.x - a.x, b.z - a.z));
+    const strip = pts.map((p) => ({ x: p.x, z: p.z, half: p.half }));
+    const cells = this.field.seedPath(strip);
+    for (const i of cells) {
+      const bed = this.field.bedAt(i);
+      const surf = this.riverSurfaceAt(this.field.cellX(i), this.field.cellZ(i), pts);
+      if (surf !== null) this.field.fillTo([i], Math.max(surf, bed + MIN_WATER_LAYER));
     }
-    const total = cum[cum.length - 1]!;
-    const drops: Array<{ x: number; y: number; z: number; baseY: number; half: number }> = [];
+
+    const head = pts[0]!;
+    const foot = pts[pts.length - 1]!;
+    this.field.addSource(head.x, head.z, 4, head.y + 1.2);
+    const footCells = this.field.seedDisc(foot.x, foot.z, foot.half + 1, undefined);
+    this.field.setDrain(footCells, foot.y);
+    this.field.markLive(cells);
+    this.field.markLive(footCells);
+    this.field.wakeNear(head.x, head.z, Math.max(head.half + 6, 12));
+
     for (let i = 1; i < pts.length; i++) {
       const a = pts[i - 1]!;
       const b = pts[i]!;
       const horiz = Math.hypot(b.x - a.x, b.z - a.z);
       const fall = a.y - b.y;
       if (fall > 4 && fall > horiz * 0.6) {
-        // a near-vertical drop: waterfall from a's lip to b's pool
-        drops.push({ x: (a.x + b.x) / 2, y: a.y, z: (a.z + b.z) / 2, baseY: b.y, half: Math.min(a.half, b.half) });
+        this.waterfalls.push({
+          x: (a.x + b.x) / 2,
+          z: (a.z + b.z) / 2,
+          topY: a.y,
+          baseY: b.y,
+          half: Math.min(a.half, b.half),
+          acc: 0,
+        });
       }
     }
-    this.river = { pts, cum, total, drops, foamAcc: 0, dropAcc: 0 };
-    this.buildRibbon(pts);
   }
 
-  // -- emission --------------------------------------------------------------
+  /** Every submerged column on the heightfield — ocean, lakes, coastlines. */
+  seedOpenWater(seaLevel: number, _field: TerrainField): void {
+    this.field.seedSubmerged(seaLevel);
+  }
 
-  /** Burst of splash droplets, e.g. when an actor wades through water. */
-  splash(x: number, y: number, z: number, n = 6, power = 8): void {
-    for (let k = 0; k < n; k++) {
+  /** Match camera view footprint so we never sim/render off-screen water. */
+  setViewCullRadius(r: number): void {
+    this.viewCullR = Math.max(32, r);
+  }
+
+  /** Shallow simulated water — player can wade when depth exceeds this. */
+  depthAt(x: number, z: number): number {
+    return this.field.depthAt(x, z);
+  }
+
+  /** Mark every simulated column walkable on the terrain mask. */
+  markTerrainWalkable(field: TerrainField): void {
+    this.field.forEachMaskedColumn((x, z) => {
+      const i = z * field.w + x;
+      field.walkable[i] = 1;
+    });
+  }
+
+  step(dt: number, player?: { x: number; z: number }): void {
+    if (player) this.player = player;
+    this.field.clearObstacles();
+    if (this.player) {
+      const wading = this.field.depthAt(this.player.x, this.player.z) >= MIN_WATER_LAYER * 0.5;
+      const wakeR = wading
+        ? Math.min(this.viewCullR * 0.85, 96)
+        : Math.min(36, this.viewCullR * 0.4);
+      this.field.wakeNear(this.player.x, this.player.z, wakeR);
+      this.field.stampObstacle(this.player.x, this.player.z, 1.1, 50);
+    }
+    this.field.step(dt);
+  }
+
+  wade(x: number, z: number, dt: number): void {
+    if (this.field.depthAt(x, z) < MIN_WATER_LAYER * 0.5) return;
+    this.field.impulse(x, z, 19, MIN_WATER_LAYER * 0.16);
+    this.wadeAcc += dt;
+    if (this.wadeAcc < 0.075) return;
+    this.wadeAcc = 0;
+    const surf = this.field.surfaceAt(x, z);
+    if (surf === -Infinity) return;
+    for (let k = 0; k < 7; k++) {
       const ang = Math.random() * Math.PI * 2;
-      const sp = power * (0.4 + Math.random() * 0.8);
-      this.emitFree(
-        x + (Math.random() - 0.5), y + 0.5, z + (Math.random() - 0.5),
-        Math.cos(ang) * sp * 0.5, power * (0.7 + Math.random() * 0.7), Math.sin(ang) * sp * 0.5,
-        y, 0.6 + Math.random() * 0.5, 0.55 + Math.random() * 0.12, 0.74 + Math.random() * 0.12, 0.95,
+      const sp = 4 + Math.random() * 8;
+      this.emitSpray(
+        x + (Math.random() - 0.5) * 0.8,
+        surf + MIN_WATER_LAYER * 0.5,
+        z + (Math.random() - 0.5) * 0.8,
+        Math.cos(ang) * sp,
+        7 + Math.random() * 10,
+        Math.sin(ang) * sp,
+        surf,
       );
     }
   }
 
-  /** Throttled splash so a walking actor leaves a steady spray, not a storm. */
-  wade(x: number, y: number, z: number, dt: number): void {
-    this.splashAcc += dt;
-    if (this.splashAcc < 0.12) return;
-    this.splashAcc = 0;
-    this.splash(x, y, z, 4, 7);
-  }
-
-  // -- per-frame -------------------------------------------------------------
-
-  update(dt: number): void {
+  render(dt: number): void {
     if (dt <= 0) return;
     dt = Math.min(dt, 0.05);
-    this.elapsed += dt;
-
-    // fountain emission
-    for (const f of this.fountains) {
-      f.acc += dt;
-      const rate = 0.012; // seconds between voxels
-      while (f.acc >= rate) {
-        f.acc -= rate;
-        const ang = Math.random() * Math.PI * 2;
-        const out = Math.random() * 3.2;
-        this.emitFree(
-          f.x + Math.cos(ang) * 0.6, f.y, f.z + Math.sin(ang) * 0.6,
-          Math.cos(ang) * out, 24 + Math.random() * 9, Math.sin(ang) * out,
-          f.basinY, 0.7 + Math.random() * 0.6,
-          0.55 + Math.random() * 0.1, 0.78 + Math.random() * 0.12, 0.98,
-        );
-      }
-    }
-
-    // river foam + waterfall droplets
-    const r = this.river;
-    if (r) {
-      r.foamAcc += dt;
-      const foamRate = 0.03;
-      while (r.foamAcc >= foamRate) {
-        r.foamAcc -= foamRate;
-        this.emitFoam();
-      }
-      r.dropAcc += dt;
-      const dropRate = 0.02;
-      while (r.dropAcc >= dropRate) {
-        r.dropAcc -= dropRate;
-        for (const d of r.drops) {
-          const lx = d.x + (Math.random() - 0.5) * d.half * 1.4;
-          const lz = d.z + (Math.random() - 0.5) * d.half * 1.4;
-          this.emitFree(
-            lx, d.y - Math.random() * 2, lz,
-            (Math.random() - 0.5) * 2, -2 - Math.random() * 4, (Math.random() - 0.5) * 2,
-            d.baseY, 0.7 + Math.random() * 0.7,
-            0.62, 0.82, 0.98,
-          );
-        }
-      }
-    }
-
-    // integrate
-    for (let i = 0; i < this.cap; i++) {
-      const p = this.parts[i]!;
-      if (!p.active) continue;
-      p.life += dt;
-      if (p.mode === 0) {
-        p.vy -= GRAV * dt;
-        p.x += p.vx * dt;
-        p.y += p.vy * dt;
-        p.z += p.vz * dt;
-        if (p.y <= p.floorY) {
-          if (p.life > p.maxLife * 0.4 && p.size > 0.55 && Math.random() < 0.25) {
-            // little secondary splash ring when a fat droplet lands
-            this.emitFree(p.x, p.floorY + 0.2, p.z, p.vx * 0.2, 3 + Math.random() * 3, p.vz * 0.2, p.floorY, 0.45, 0.7, 0.85, 0.98);
-          }
-          this.hideAndKill(i);
-          continue;
-        }
-      } else {
-        // foam riding the river
-        p.s += p.speed * dt;
-        const samp = this.sampleRiver(p.s);
-        if (!samp) { this.hideAndKill(i); continue; }
-        p.x = samp.x + samp.nx * p.lateral;
-        p.z = samp.z + samp.nz * p.lateral;
-        p.y = samp.y + 0.35 + Math.sin((this.elapsed + p.s) * 6) * 0.15;
-        // speed up on the steeps
-        p.speed = samp.steep ? 34 : 13;
-      }
-      if (p.life >= p.maxLife) { this.hideAndKill(i); continue; }
-      this.write(i, p);
-    }
-    this.mesh.instanceMatrix.needsUpdate = true;
-    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+    this.emitSources(dt);
+    this.stepDroplets(dt);
+    this.rebuildMergedVisuals();
   }
 
   dispose(): void {
-    this.scene.remove(this.mesh);
-    this.mesh.geometry.dispose();
-    (this.mesh.material as THREE.Material).dispose();
-    this.ribbons.forEach((m) => {
-      this.scene.remove(m);
-      m.geometry.dispose();
-      (m.material as THREE.Material).dispose();
-    });
-    this.ribbons = [];
+    this.scene.remove(this.waterMesh);
+    this.waterMesh.geometry.dispose();
+    (this.waterMesh.material as THREE.Material).dispose();
     this.fountains = [];
-    this.river = null;
+    this.waterEmitters = [];
+    this.waterfalls = [];
   }
 
-  // -- internals -------------------------------------------------------------
+  private inView(x: number, z: number): boolean {
+    const px = this.player?.x ?? this.field.w * 0.5;
+    const pz = this.player?.z ?? this.field.d * 0.5;
+    const r = this.viewCullR * WAKE_MARGIN;
+    const dx = x - px;
+    const dz = z - pz;
+    return dx * dx + dz * dz <= r * r;
+  }
 
-  private emitFree(
-    x: number, y: number, z: number,
-    vx: number, vy: number, vz: number,
-    floorY: number, size: number, r: number, g: number, b: number,
+  private emitSources(dt: number): void {
+    for (const e of this.waterEmitters) {
+      if (!this.inView(e.x, e.z)) continue;
+      e.acc += dt;
+      while (e.acc >= 0.1) {
+        e.acc -= 0.1;
+        const ang = Math.random() * Math.PI * 2;
+        const out = 0.8 + Math.random() * 2.2;
+        const lift = 10 + Math.random() * 8;
+        this.emitSpray(
+          e.x + (Math.random() - 0.5) * 0.4,
+          e.y + 0.3 + Math.random() * 0.3,
+          e.z + (Math.random() - 0.5) * 0.4,
+          Math.cos(ang) * out,
+          lift,
+          Math.sin(ang) * out,
+          e.y - 1.5,
+        );
+      }
+    }
+    for (const wf of this.waterfalls) {
+      if (!this.inView(wf.x, wf.z)) continue;
+      wf.acc += dt;
+      while (wf.acc >= 0.06) {
+        wf.acc -= 0.06;
+        const lx = wf.x + (Math.random() - 0.5) * wf.half * 1.2;
+        const lz = wf.z + (Math.random() - 0.5) * wf.half * 1.2;
+        this.emitSpray(
+          lx,
+          wf.topY - Math.random() * 1.2,
+          lz,
+          (Math.random() - 0.5) * 1.5,
+          -1.5 - Math.random() * 2.5,
+          (Math.random() - 0.5) * 1.5,
+          wf.baseY + MIN_WATER_LAYER,
+        );
+      }
+    }
+  }
+
+  private stepDroplets(dt: number): void {
+    for (let i = 0; i < SPRAY_CAP; i++) {
+      const p = this.drops[i]!;
+      if (!p.active) continue;
+      p.life += dt;
+      p.vy -= GRAV * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.z += p.vz * dt;
+      if (p.y <= p.floorY) {
+        this.field.depositAt(p.x, p.z);
+        this.field.impulse(p.x, p.z, 2, MIN_WATER_LAYER * 0.06);
+        p.active = false;
+        continue;
+      }
+      if (p.life >= p.maxLife) p.active = false;
+    }
+    this.stats.sprayActive = this.drops.filter((p) => p.active).length;
+  }
+
+  /** Snap continuous positions → grid, cluster, draw all water in view. */
+  private rebuildMergedVisuals(): void {
+    const cells = this.cellScratch;
+    cells.clear();
+
+    const px = this.player?.x ?? this.field.w * 0.5;
+    const pz = this.player?.z ?? this.field.d * 0.5;
+    const r = this.viewCullR * WAKE_MARGIN;
+
+    // Bulk surface: integer column keys only — ignore sub-cell drift for render.
+    this.field.forEachSurfaceParticleNear(px, pz, r, (_x, y, _z, colGx, colGz) =>
+      this.snapBulkParticle(colGx, colGz, y, cells),
+    );
+
+    for (let i = 0; i < SPRAY_CAP; i++) {
+      const p = this.drops[i]!;
+      if (!p.active) continue;
+      const dx = p.x - px;
+      const dz = p.z - pz;
+      if (dx * dx + dz * dz > r * r) continue;
+      updateDominantCell(p.x, p.y, p.z, p.render);
+      this.accumulateCell(p.render.x, p.render.y, p.render.z, cells, 'spray');
+    }
+
+    classifyLiquidClusters(cells);
+
+    let inst = 0;
+    // Bulk surface: one full voxel per wet column (never merge lakes/rivers into blobs).
+    for (const c of cells.values()) {
+      if (inst >= WATER_RENDER_CAP) break;
+      if (c.bulk <= 0) continue;
+      this.v.copy(voxelCenter(c.gx, c.gy, c.gz));
+      this.sc.set(VOXEL_UNIT, VOXEL_UNIT, VOXEL_UNIT);
+      this.dummy.compose(this.v, this.q, this.sc);
+      this.waterMesh.setMatrixAt(inst, this.dummy);
+      this.col.copy(c.liquid ? COLOR_LIQUID : COLOR_SPLASH);
+      this.waterMesh.setColorAt(inst, this.col);
+      inst++;
+    }
+
+    // Airborne spray: merge only adjacent spray cells into small supervoxels.
+    const sprayOnly = new Map<string, VisualCell>();
+    for (const [key, c] of cells) {
+      if (c.spray <= 0) continue;
+      sprayOnly.set(key, { ...c, bulk: 0 });
+    }
+    classifyLiquidClusters(sprayOnly);
+    const sprayGroups = groupXzClusters(sprayOnly);
+
+    for (const g of sprayGroups) {
+      if (inst >= WATER_RENDER_CAP) break;
+      const spray = g.cells.reduce((n, c) => n + c.spray, 0);
+      if (spray <= 0) continue;
+      const liquid = g.cellCount >= 2 || spray >= 2;
+      this.v.copy(voxelCenter(g.cx, g.cy, g.cz));
+      const scale = (liquid ? supervoxelScale(g.cellCount, 0.1) : 1) * VOXEL_UNIT;
+      this.sc.set(scale, scale, scale);
+      this.dummy.compose(this.v, this.q, this.sc);
+      this.waterMesh.setMatrixAt(inst, this.dummy);
+      this.col.copy(liquid ? COLOR_LIQUID : COLOR_SPLASH);
+      if (liquid) this.col.lerp(COLOR_SPLASH, 0.25);
+      this.waterMesh.setColorAt(inst, this.col);
+      inst++;
+    }
+
+    const s = enforceVoxelScale(VOXEL_UNIT, VOXEL_UNIT, VOXEL_UNIT);
+    this.sc.set(s.x, s.y, s.z);
+
+    this.waterMesh.count = inst;
+    this.stats.waterInstances = inst;
+    this.stats.waterEmitters = this.waterEmitters.length;
+    this.waterMesh.instanceMatrix.needsUpdate = true;
+    if (this.waterMesh.instanceColor) this.waterMesh.instanceColor.needsUpdate = true;
+    if (inst > 0) this.waterMesh.computeBoundingSphere();
+  }
+
+  /** Bulk sim columns use integer XZ column + snapped surface Y. */
+  private snapBulkParticle(colGx: number, colGz: number, surfaceY: number, cells: Map<string, VisualCell>): void {
+    const gy = Math.round(surfaceY / VOXEL_UNIT);
+    this.accumulateCell(colGx, gy, colGz, cells, 'bulk');
+  }
+
+  private accumulateCell(
+    gx: number,
+    gy: number,
+    gz: number,
+    cells: Map<string, VisualCell>,
+    kind: 'bulk' | 'spray',
   ): void {
-    const i = this.alloc();
-    const p = this.parts[i]!;
-    p.active = true; p.mode = 0;
-    p.x = x; p.y = y; p.z = z;
-    p.vx = vx; p.vy = vy; p.vz = vz; p.floorY = floorY;
-    p.life = 0; p.maxLife = 2.2; p.size = size;
-    p.r = r; p.g = g; p.b = b;
-    this.write(i, p);
+    const key = cellKey(gx, gy, gz);
+    let c = cells.get(key);
+    if (!c) {
+      c = { gx, gy, gz, bulk: 0, spray: 0, liquid: false };
+      cells.set(key, c);
+    }
+    if (kind === 'bulk') c.bulk += 1;
+    else c.spray += 1;
   }
 
-  private emitFoam(): void {
-    const r = this.river!;
+  private emitSpray(x: number, y: number, z: number, vx: number, vy: number, vz: number, floorY: number): void {
     const i = this.alloc();
-    const p = this.parts[i]!;
-    const samp = this.sampleRiver(0)!;
-    p.active = true; p.mode = 1;
-    p.s = Math.random() * 4;
-    p.lateral = (Math.random() - 0.5) * samp.half * 1.5;
-    p.speed = 13;
-    p.x = samp.x; p.y = samp.y + 0.35; p.z = samp.z;
-    p.life = 0; p.maxLife = (r.total / 12) + 2; p.size = 0.7 + Math.random() * 0.6;
-    p.r = 0.78; p.g = 0.9; p.b = 1.0;
-    this.write(i, p);
+    const p = this.drops[i]!;
+    p.active = true;
+    p.x = x; p.y = y; p.z = z;
+    p.vx = vx; p.vy = vy; p.vz = vz;
+    p.floorY = floorY;
+    p.life = 0;
+    p.maxLife = 2.4;
+    updateDominantCell(p.x, p.y, p.z, p.render);
   }
 
   private alloc(): number {
-    for (let k = 0; k < this.cap; k++) {
-      const i = (this.next + k) % this.cap;
-      if (!this.parts[i]!.active) { this.next = (i + 1) % this.cap; return i; }
-    }
-    const i = this.next; this.next = (i + 1) % this.cap; return i; // overwrite oldest-ish
-  }
-
-  private hideAndKill(i: number): void {
-    this.parts[i]!.active = false;
-    this.hide(i);
-  }
-
-  private hide(i: number): void {
-    this.sc.set(0, 0, 0);
-    this.v.set(0, -9999, 0);
-    this.dummy.compose(this.v, this.q, this.sc);
-    this.mesh.setMatrixAt(i, this.dummy);
-  }
-
-  private write(i: number, p: Particle): void {
-    this.v.set(p.x, p.y, p.z);
-    this.sc.set(p.size, p.size, p.size);
-    this.dummy.compose(this.v, this.q, this.sc);
-    this.mesh.setMatrixAt(i, this.dummy);
-    this.col.setRGB(p.r, p.g, p.b);
-    this.mesh.setColorAt(i, this.col);
-  }
-
-  /** Sample river position + unit normal (XZ) + steepness at arc length s. */
-  private sampleRiver(s: number): { x: number; y: number; z: number; nx: number; nz: number; half: number; steep: boolean } | null {
-    const r = this.river;
-    if (!r) return null;
-    if (s >= r.total) return null;
-    if (s < 0) s = 0;
-    let i = 1;
-    while (i < r.cum.length && r.cum[i]! < s) i++;
-    const a = r.pts[i - 1]!;
-    const b = r.pts[i]!;
-    const seg = r.cum[i]! - r.cum[i - 1]! || 1;
-    const t = (s - r.cum[i - 1]!) / seg;
-    const x = a.x + (b.x - a.x) * t;
-    const y = a.y + (b.y - a.y) * t;
-    const z = a.z + (b.z - a.z) * t;
-    const half = a.half + (b.half - a.half) * t;
-    let dx = b.x - a.x;
-    let dz = b.z - a.z;
-    const dl = Math.hypot(dx, dz) || 1;
-    dx /= dl; dz /= dl;
-    const steep = a.y - b.y > 4 && a.y - b.y > Math.hypot(b.x - a.x, b.z - a.z) * 0.6;
-    return { x, y, z, nx: -dz, nz: dx, half, steep };
-  }
-
-  /** Translucent water-surface ribbon following the river (vertical at falls). */
-  private buildRibbon(pts: RiverPoint[]): void {
-    const positions: number[] = [];
-    const indices: number[] = [];
-    for (let i = 0; i < pts.length; i++) {
-      const p = pts[i]!;
-      const prev = pts[Math.max(0, i - 1)]!;
-      const nx0 = pts[Math.min(pts.length - 1, i + 1)]!.x - prev.x;
-      const nz0 = pts[Math.min(pts.length - 1, i + 1)]!.z - prev.z;
-      const dl = Math.hypot(nx0, nz0) || 1;
-      const nx = -nz0 / dl;
-      const nz = nx0 / dl;
-      positions.push(p.x + nx * p.half, p.y, p.z + nz * p.half);
-      positions.push(p.x - nx * p.half, p.y, p.z - nz * p.half);
-      if (i > 0) {
-        const a = (i - 1) * 2;
-        indices.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+    for (let k = 0; k < SPRAY_CAP; k++) {
+      const i = (this.next + k) % SPRAY_CAP;
+      if (!this.drops[i]!.active) {
+        this.next = (i + 1) % SPRAY_CAP;
+        return i;
       }
     }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    geo.setIndex(indices);
-    geo.computeVertexNormals();
-    const mat = new THREE.MeshLambertMaterial({
-      color: 0x3f8fd0, transparent: true, opacity: 0.8, side: THREE.DoubleSide,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    this.scene.add(mesh);
-    this.ribbons.push(mesh);
+    const i = this.next;
+    this.next = (i + 1) % SPRAY_CAP;
+    return i;
+  }
+
+  private riverSurfaceAt(x: number, z: number, pts: RiverPoint[]): number | null {
+    let best = Infinity;
+    let surf = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1]!;
+      const b = pts[i]!;
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const len2 = dx * dx + dz * dz || 1;
+      const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / len2));
+      const px = a.x + dx * t;
+      const pz = a.z + dz * t;
+      const d = (x - px) ** 2 + (z - pz) ** 2;
+      if (d < best) {
+        best = d;
+        surf = a.y + (b.y - a.y) * t;
+      }
+    }
+    return best < 64 ? surf : null;
   }
 }

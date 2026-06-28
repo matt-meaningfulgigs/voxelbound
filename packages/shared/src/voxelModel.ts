@@ -9,6 +9,10 @@ export const VoxelEntrySchema = z.tuple([
 
 export type VoxelEntry = z.infer<typeof VoxelEntrySchema>;
 
+/** Per-palette-slot emission behavior for shader / particle systems. */
+export const EmitterKindSchema = z.enum(['solid', 'fire', 'smoke', 'water']);
+export type EmitterKind = z.infer<typeof EmitterKindSchema>;
+
 export const AnimationClipSchema = z.object({
   frames: z.array(z.string()).min(1),
   ticksPerFrame: z.number().nullable().default(null),
@@ -23,6 +27,8 @@ export const VoxelModelSchema = z.object({
   pivot: z.tuple([z.number(), z.number(), z.number()]).default([0, 0, 0]),
   animations: z.record(AnimationClipSchema).default({}),
   frames: z.record(z.array(VoxelEntrySchema)),
+  /** Parallel to palette — how each slot behaves in the world (default solid). */
+  paletteEmitters: z.array(EmitterKindSchema).optional(),
   behavior: z.enum(['displace', 'fluid']).optional(),
 });
 
@@ -62,4 +68,62 @@ export function voxelsFromFrame(
     z,
     color: parseHexColor(model.palette[ci] ?? '#ff00ff'),
   }));
+}
+
+export function emitterKindFor(model: VoxelModel, paletteIndex: number): EmitterKind {
+  return model.paletteEmitters?.[paletteIndex] ?? 'solid';
+}
+
+export interface EmitterVoxel {
+  x: number;
+  y: number;
+  z: number;
+  kind: Exclude<EmitterKind, 'solid'>;
+}
+
+/** Model-space emitter voxels for a frame (skips solid palette slots). */
+export function emittersFromFrame(model: VoxelModel, frameId: string): EmitterVoxel[] {
+  const out: EmitterVoxel[] = [];
+  for (const [x, y, z, ci] of model.frames[frameId] ?? []) {
+    const kind = emitterKindFor(model, ci);
+    if (kind === 'solid') continue;
+    out.push({ x, y, z, kind });
+  }
+  return out;
+}
+
+/** Rotate model-local offset by prop facing (0–3 quarter turns). */
+export function rotateFacingOffset(
+  lx: number,
+  lz: number,
+  facing: 0 | 1 | 2 | 3,
+): { x: number; z: number } {
+  switch (facing & 3) {
+    case 1:
+      return { x: -lz, z: lx };
+    case 2:
+      return { x: -lx, z: -lz };
+    case 3:
+      return { x: lz, z: -lx };
+    default:
+      return { x: lx, z: lz };
+  }
+}
+
+/** World-space emitters for a placed prop (matches {@link placeProp} pivot + facing). */
+export function worldEmittersFromPlacement(
+  model: VoxelModel,
+  frameId: string,
+  worldX: number,
+  worldY: number,
+  worldZ: number,
+  facing: 0 | 1 | 2 | 3 = 0,
+): EmitterVoxel[] {
+  const [pvx, , pvz] = model.pivot;
+  return emittersFromFrame(model, frameId).map(({ x, y, z, kind }) => {
+    const lx = x - pvx;
+    const lz = z - pvz;
+    const r = rotateFacingOffset(lx, lz, facing);
+    return { x: worldX + r.x, y: worldY + y, z: worldZ + r.z, kind };
+  });
 }
