@@ -29,6 +29,7 @@ import { buildTerrainMeshes } from '../render/ChunkMesher';
 import { GrassLayer } from '../render/GrassLayer';
 import { NavGrid, findPath, type NavPoint } from '../systems/Pathfinding';
 import { WaterFeatures, type RiverPoint } from '../systems/WaterFeatures';
+import { MIN_WATER_LAYER } from '../systems/FluidField';
 import { EmitterEffects } from '../systems/EmitterEffects';
 import { EditorWorld } from '../state/EditorWorld';
 
@@ -332,7 +333,8 @@ export class OverworldScene implements Scene {
     const an = world.stores.animation.get(a.id)!;
 
     const axis = input.getAxis();
-    const speed = m.speed * (input.isHeld('run') ? m.runMultiplier : 1);
+    let speed = m.speed * (input.isHeld('run') ? m.runMultiplier : 1);
+    if (this.water?.inMud(t.x, t.z)) speed *= 0.52;
     const vx = axis.x * speed;
     const vz = axis.z * speed;
     const moving = axis.x !== 0 || axis.z !== 0;
@@ -783,6 +785,7 @@ export class OverworldScene implements Scene {
       this.water?.addPropWaterEmitters(fountainModel, 'default', fx, fBase, fz, 0);
     }
     this.seedWorldWater();
+    this.carveMudPit(field, def.coreLevel);
     if (this.terrainField) this.water?.markTerrainWalkable(this.terrainField);
     for (const [dx, dz] of [[-52, -52], [52, -52], [-52, 52], [52, 52]] as const) this.placeProp('lamp', CX + dx, CZ + dz);
 
@@ -895,6 +898,26 @@ export class OverworldScene implements Scene {
     if (!this.terrainField) return;
     if (this.riverPath.length) this.water?.seedRiver(this.riverPath);
     this.water?.seedOpenWater(this.seaLevel, this.terrainField);
+  }
+
+  /** Sunken mud pit south-east of town — viscous fluid, holds footprints. */
+  private carveMudPit(field: TerrainField, coreLevel: number): void {
+    const mx = this.cx + 72;
+    const mz = this.cz + 118;
+    const r = 14;
+    const floor = coreLevel - 1.4;
+    for (let z = Math.floor(mz - r); z <= Math.ceil(mz + r); z++) {
+      for (let x = Math.floor(mx - r); x <= Math.ceil(mx + r); x++) {
+        if (x < 0 || z < 0 || x >= field.w || z >= field.d) continue;
+        if (Math.hypot(x - mx, z - mz) > r) continue;
+        const i = z * field.w + x;
+        field.height[i] = floor;
+        field.material[i] = TerrainMaterial.Dirt;
+        field.walkable[i] = 1;
+      }
+    }
+    const surf = floor + MIN_WATER_LAYER * 1.15;
+    this.water?.seedMudPit(mx, mz, r - 1, surf);
   }
 
   /** Flatten a foundation pad + walkable doorway apron under each building. */

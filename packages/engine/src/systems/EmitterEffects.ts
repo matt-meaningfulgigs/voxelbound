@@ -135,8 +135,9 @@ export function classifyFireClusters(cells: Map<string, VisualCell>, clusterR = 
   classifyClusters3D(cells, clusterR, 2, 1.5);
 }
 
+/** Cluster intensity for color/brightness — each cell stays one unit cube. */
 export function fireClusterScale(mass: number, weight: number): number {
-  return 0.85 + Math.min(3.2, Math.sqrt(mass) * 0.52 + (weight - 1) * 0.08);
+  return 1 + Math.min(0.45, Math.sqrt(mass) * 0.06 + (weight - 1) * 0.04);
 }
 
 /** Aggregate adjacent fire emitter voxels into regions (eliminates O(n²) neighbor scans). */
@@ -543,14 +544,14 @@ export class EmitterEffects {
       const t = c.ageSum / Math.max(c.weight, 1);
       const avgHeat = c.heatSum / Math.max(c.weight, 1);
       const flicker = 0.7 + Math.random() * 0.35;
-      if (avgHeat > 0.7 || t < 0.35) this.col.copy(COLOR_FIRE_C).multiplyScalar(flicker);
-      else if (t < 0.72) this.col.copy(COLOR_FIRE_A).multiplyScalar(flicker);
-      else this.col.copy(COLOR_FIRE_B).multiplyScalar(flicker);
+      if (avgHeat > 0.7 || t < 0.35) this.col.copy(COLOR_FIRE_C);
+      else if (t < 0.72) this.col.copy(COLOR_FIRE_A);
+      else this.col.copy(COLOR_FIRE_B);
+      const boost = fireClusterScale(c.clusterMass, c.weight) * flicker;
+      this.col.multiplyScalar(boost);
 
-      const scale = fireClusterScale(c.clusterMass, c.weight);
       this.v.copy(voxelCenter(c.gx, c.gy, c.gz));
-      const sz = scale * VOXEL_UNIT;
-      this.sc.set(sz, sz, sz);
+      this.sc.set(VOXEL_UNIT, VOXEL_UNIT, VOXEL_UNIT);
       this.dummy.compose(this.v, this.q, this.sc);
       this.fireMesh.setMatrixAt(inst, this.dummy);
       this.fireMesh.setColorAt(inst, this.col);
@@ -589,10 +590,10 @@ export class EmitterEffects {
       if (!c.billow && density < 0.2) continue;
 
       this.col.copy(COLOR_SMOKE_DARK).lerp(COLOR_SMOKE_LIGHT, age * 0.55 + density * 0.35);
-      const puff = (c.billow ? 1.35 + density * 0.55 : 1.05) + Math.min(1.2, c.clusterMass * 0.08);
+      if (c.billow) this.col.multiplyScalar(1 + Math.min(0.25, c.clusterMass * 0.03));
+
       this.v.copy(voxelCenter(c.gx, c.gy, c.gz));
-      const sz = puff * VOXEL_UNIT;
-      this.sc.set(sz, sz, sz);
+      this.sc.set(VOXEL_UNIT, VOXEL_UNIT, VOXEL_UNIT);
       this.dummy.compose(this.v, this.q, this.sc);
       this.smokeMesh.setMatrixAt(inst, this.dummy);
       this.smokeMesh.setColorAt(inst, this.col);

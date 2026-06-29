@@ -3,12 +3,12 @@ import {
   VOXEL_UNIT,
   enforceVoxelScale,
   updateDominantCell,
+  dominantVoxelCell,
   type TerrainField,
   type VoxelModel,
   worldEmittersFromPlacement,
 } from '@voxelbound/shared';
 import { unitVoxelGeometry, voxelCenter } from '../render/voxelGeometry';
-import { groupXzClusters, supervoxelScale } from '../render/supervoxelClusters';
 import { FluidField, MIN_WATER_LAYER } from './FluidField';
 
 /** A point on the river centreline: world position, surface height, half-width. */
@@ -42,6 +42,8 @@ export const WATER_SURFACE_OPACITY = 0.8;
 const COLOR_LIQUID = new THREE.Color(WATER_SURFACE_COLOR);
 /** Foam / airborne spray — lighter but still blue-tinted, not opaque white. */
 const COLOR_SPLASH = new THREE.Color(0.66, 0.82, 0.96);
+const COLOR_MUD = new THREE.Color(0x5c4033);
+const COLOR_MUD_WET = new THREE.Color(0x4a3328);
 
 interface Droplet {
   active: boolean;
@@ -64,6 +66,7 @@ interface VisualCell {
   bulk: number;
   spray: number;
   liquid: boolean;
+  mud: boolean;
 }
 
 interface Fountain {
@@ -296,6 +299,16 @@ export class WaterFeatures {
     this.field.seedSubmerged(seaLevel);
   }
 
+  /** Big mud pit — viscous, holds tracks, same sim as water. */
+  seedMudPit(cx: number, cz: number, r: number, surfaceY: number): void {
+    this.field.seedMudDisc(cx, cz, r, surfaceY);
+  }
+
+  /** True when standing in simulated mud (for movement slowdown). */
+  inMud(x: number, z: number): boolean {
+    return this.field.isMudAt(x, z) && this.field.depthAt(x, z) >= MIN_WATER_LAYER * 0.4;
+  }
+
   /** Match camera view footprint so we never sim/render off-screen water. */
   setViewCullRadius(r: number): void {
     this.viewCullR = Math.max(32, r);
@@ -329,22 +342,27 @@ export class WaterFeatures {
   }
 
   wade(x: number, z: number, dt: number): void {
-    if (this.field.depthAt(x, z) < MIN_WATER_LAYER * 0.5) return;
-    this.field.impulse(x, z, 19, MIN_WATER_LAYER * 0.16);
+    const depth = this.field.depthAt(x, z);
+    if (depth < MIN_WATER_LAYER * 0.5) return;
+    const mud = this.field.isMudAt(x, z);
+    const push = mud ? 14 : 22;
+    const lift = mud ? MIN_WATER_LAYER * 0.1 : MIN_WATER_LAYER * 0.14;
+    this.field.impulse(x, z, push, lift);
     this.wadeAcc += dt;
-    if (this.wadeAcc < 0.075) return;
+    if (mud) return;
+    if (this.wadeAcc < 0.06) return;
     this.wadeAcc = 0;
     const surf = this.field.surfaceAt(x, z);
     if (surf === -Infinity) return;
-    for (let k = 0; k < 7; k++) {
+    for (let k = 0; k < 6; k++) {
       const ang = Math.random() * Math.PI * 2;
-      const sp = 4 + Math.random() * 8;
+      const sp = 5 + Math.random() * 9;
       this.emitSpray(
         x + (Math.random() - 0.5) * 0.8,
-        surf + MIN_WATER_LAYER * 0.5,
+        surf + MIN_WATER_LAYER * 0.45,
         z + (Math.random() - 0.5) * 0.8,
         Math.cos(ang) * sp,
-        7 + Math.random() * 10,
+        8 + Math.random() * 11,
         Math.sin(ang) * sp,
         surf,
       );
@@ -428,7 +446,7 @@ export class WaterFeatures {
       p.z += p.vz * dt;
       if (p.y <= p.floorY) {
         this.field.depositAt(p.x, p.z);
-        this.field.impulse(p.x, p.z, 2, MIN_WATER_LAYER * 0.06);
+        this.field.impulse(p.x, p.z, 3, MIN_WATER_LAYER * 0.05);
         p.active = false;
         continue;
       }
@@ -446,9 +464,9 @@ export class WaterFeatures {
     const pz = this.player?.z ?? this.field.d * 0.5;
     const r = this.viewCullR * WAKE_MARGIN;
 
-    // Bulk surface: integer column keys only — ignore sub-cell drift for render.
-    this.field.forEachSurfaceParticleNear(px, pz, r, (_x, y, _z, colGx, colGz) =>
-      this.snapBulkParticle(colGx, colGz, y, cells),
+    // Bulk surface: snap drifted sim positions to the voxel grid (blocky ripples).
+    this.field.forEachSurfaceParticleNear(px, pz, r, (wx, wy, wz, colGx, colGz) =>
+      this.snapBulkParticle(wx, wy, wz, colGx, colGz, cells),
     );
 
     for (let i = 0; i < SPRAY_CAP; i++) {
@@ -472,32 +490,29 @@ export class WaterFeatures {
       this.sc.set(VOXEL_UNIT, VOXEL_UNIT, VOXEL_UNIT);
       this.dummy.compose(this.v, this.q, this.sc);
       this.waterMesh.setMatrixAt(inst, this.dummy);
-      this.col.copy(c.liquid ? COLOR_LIQUID : COLOR_SPLASH);
+      if (c.mud) {
+        this.col.copy(c.liquid ? COLOR_MUD_WET : COLOR_MUD);
+      } else {
+        this.col.copy(c.liquid ? COLOR_LIQUID : COLOR_SPLASH);
+      }
       this.waterMesh.setColorAt(inst, this.col);
       inst++;
     }
 
-    // Airborne spray: merge only adjacent spray cells into small supervoxels.
-    const sprayOnly = new Map<string, VisualCell>();
-    for (const [key, c] of cells) {
-      if (c.spray <= 0) continue;
-      sprayOnly.set(key, { ...c, bulk: 0 });
-    }
-    classifyLiquidClusters(sprayOnly);
-    const sprayGroups = groupXzClusters(sprayOnly);
-
-    for (const g of sprayGroups) {
+    // Spray: one unit cube per occupied cell; cluster membership tints color only.
+    for (const c of cells.values()) {
       if (inst >= WATER_RENDER_CAP) break;
-      const spray = g.cells.reduce((n, c) => n + c.spray, 0);
-      if (spray <= 0) continue;
-      const liquid = g.cellCount >= 2 || spray >= 2;
-      this.v.copy(voxelCenter(g.cx, g.cy, g.cz));
-      const scale = (liquid ? supervoxelScale(g.cellCount, 0.1) : 1) * VOXEL_UNIT;
-      this.sc.set(scale, scale, scale);
+      if (c.spray <= 0) continue;
+      this.v.copy(voxelCenter(c.gx, c.gy, c.gz));
+      this.sc.set(VOXEL_UNIT, VOXEL_UNIT, VOXEL_UNIT);
       this.dummy.compose(this.v, this.q, this.sc);
       this.waterMesh.setMatrixAt(inst, this.dummy);
-      this.col.copy(liquid ? COLOR_LIQUID : COLOR_SPLASH);
-      if (liquid) this.col.lerp(COLOR_SPLASH, 0.25);
+      if (c.liquid) {
+        this.col.copy(COLOR_LIQUID);
+        if (c.spray >= 2) this.col.lerp(COLOR_SPLASH, 0.15);
+      } else {
+        this.col.copy(COLOR_SPLASH);
+      }
       this.waterMesh.setColorAt(inst, this.col);
       inst++;
     }
@@ -513,10 +528,31 @@ export class WaterFeatures {
     if (inst > 0) this.waterMesh.computeBoundingSphere();
   }
 
-  /** Bulk sim columns use integer XZ column + snapped surface Y. */
-  private snapBulkParticle(colGx: number, colGz: number, surfaceY: number, cells: Map<string, VisualCell>): void {
-    const gy = Math.round(surfaceY / VOXEL_UNIT);
-    this.accumulateCell(colGx, gy, colGz, cells, 'bulk');
+  /** Snap drifted sim particle to dominant voxel cell (blocky ripple, unit cubes). */
+  private snapBulkParticle(
+    wx: number,
+    wy: number,
+    wz: number,
+    colGx: number,
+    colGz: number,
+    cells: Map<string, VisualCell>,
+  ): void {
+    const { x: gx, y: gy, z: gz } = dominantVoxelCell(wx, wy, wz);
+    const key = cellKey(gx, gy, gz);
+    let c = cells.get(key);
+    if (!c) {
+      c = {
+        gx,
+        gy,
+        gz,
+        bulk: 0,
+        spray: 0,
+        liquid: false,
+        mud: this.field.isMudAt(colGx, colGz),
+      };
+      cells.set(key, c);
+    }
+    c.bulk += 1;
   }
 
   private accumulateCell(
@@ -529,7 +565,7 @@ export class WaterFeatures {
     const key = cellKey(gx, gy, gz);
     let c = cells.get(key);
     if (!c) {
-      c = { gx, gy, gz, bulk: 0, spray: 0, liquid: false };
+      c = { gx, gy, gz, bulk: 0, spray: 0, liquid: false, mud: false };
       cells.set(key, c);
     }
     if (kind === 'bulk') c.bulk += 1;

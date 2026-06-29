@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { classifyLiquidClusters } from './WaterFeatures';
 
-function cell(gx: number, gy: number, gz: number, bulk: number, spray = 0, liquid = false) {
-  return { gx, gy, gz, bulk, spray, liquid };
+function cell(gx: number, gy: number, gz: number, bulk: number, spray = 0, liquid = false, mud = false) {
+  return { gx, gy, gz, bulk, spray, liquid, mud };
 }
 
 describe('classifyLiquidClusters', () => {

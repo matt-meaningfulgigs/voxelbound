@@ -89,6 +89,8 @@ export class FluidField {
   private mask: Uint8Array;
   /** 1 = river/fountain — stay awake longer when disturbed. */
   private live: Uint8Array;
+  /** 1 = thick mud (slow flow, holds tracks, brown render). */
+  private mud: Uint8Array;
 
   /** Stable list of masked cell indices (fixed render topology). */
   private masked: number[] = [];
@@ -118,6 +120,7 @@ export class FluidField {
     this.restDepth = new Float32Array(n).fill(NaN);
     this.mask = new Uint8Array(n);
     this.live = new Uint8Array(n);
+    this.mud = new Uint8Array(n);
   }
 
   private idx(x: number, z: number): number {
@@ -231,6 +234,22 @@ export class FluidField {
     return added;
   }
 
+  /**
+   * Shallow mud pit — same heightfield sim as water but viscous, holds footprints,
+   * and relaxes slowly back toward rest depth.
+   */
+  seedMudDisc(cx: number, cz: number, r: number, surfaceY: number, depth = MIN_WATER_LAYER * 1.2): number[] {
+    const cells = this.seedDisc(cx, cz, r);
+    for (const i of cells) {
+      this.mud[i] = 1;
+      const d = Math.max(depth, surfaceY - this.bed[i]!, MIN_WATER_LAYER);
+      this.h[i] = d;
+      this.restDepth[i] = d;
+      this.wake(i);
+    }
+    return cells;
+  }
+
   /** River / fountain columns — always eligible for live sim + dynamic render. */
   markLive(cells: ReadonlyArray<number>): void {
     for (const i of cells) if (this.mask[i]) this.live[i] = 1;
@@ -238,6 +257,14 @@ export class FluidField {
 
   isLive(i: number): boolean {
     return this.live[i]! === 1;
+  }
+
+  isMudAt(x: number, z: number): boolean {
+    const ix = Math.round(x);
+    const iz = Math.round(z);
+    if (ix < 0 || iz < 0 || ix >= this.w || iz >= this.d) return false;
+    const i = this.idx(ix, iz);
+    return this.mask[i]! === 1 && this.mud[i]! === 1;
   }
 
   isActive(i: number): boolean {
@@ -315,7 +342,15 @@ export class FluidField {
         this.vz[i] = this.vz[i]! + (dz / dist) * f;
         this.px[i] = this.px[i]! + (dx / dist) * f * 0.12;
         this.pz[i] = this.pz[i]! + (dz / dist) * f * 0.12;
-        this.h[i] = Math.max(0, this.h[i]! + lift * (1 - dist / r));
+        const liftAmt = lift * (1 - dist / r);
+        if (this.mud[i]) {
+          this.h[i] = this.h[i]! + liftAmt * 0.65;
+        } else if (!Number.isNaN(this.restDepth[i]!)) {
+          const rest = this.restDepth[i]!;
+          this.h[i] = Math.min(this.h[i]! + liftAmt, rest + 0.18);
+        } else {
+          this.h[i] = Math.max(0, this.h[i]! + liftAmt);
+        }
         this.wake(i);
       }
     }
@@ -405,10 +440,10 @@ export class FluidField {
 
         let fl = 0, fr = 0, ft = 0, fb = 0;
         if (hi > MIN_DEPTH) {
-          if (x > 0 && this.mask[i - 1]) fl = this.pipe(this.fL[i]!, top, i - 1, dt);
-          if (x < w - 1 && this.mask[i + 1]) fr = this.pipe(this.fR[i]!, top, i + 1, dt);
-          if (z > 0 && this.mask[i - w]) ft = this.pipe(this.fT[i]!, top, i - w, dt);
-          if (z < this.d - 1 && this.mask[i + w]) fb = this.pipe(this.fB[i]!, top, i + w, dt);
+          if (x > 0 && this.mask[i - 1]) fl = this.pipe(this.fL[i]!, top, i - 1, dt, i);
+          if (x < w - 1 && this.mask[i + 1]) fr = this.pipe(this.fR[i]!, top, i + 1, dt, i);
+          if (z > 0 && this.mask[i - w]) ft = this.pipe(this.fT[i]!, top, i - w, dt, i);
+          if (z < this.d - 1 && this.mask[i + w]) fb = this.pipe(this.fB[i]!, top, i + w, dt, i);
 
           const out = (fl + fr + ft + fb) * dt;
           if (out > hi) {
@@ -447,15 +482,16 @@ export class FluidField {
         this.vz[i] = ((inT - this.fT[i]!) + (this.fB[i]! - inB)) * 0.5 / hbar;
 
         const target = this.targetDepth(i);
-        const unsettled = h > MIN_DEPTH && Math.abs(h - target) > 0.06;
+        const unsettled = h > MIN_DEPTH && Math.abs(h - target) > 0.04;
         const downhill = h > MIN_DEPTH && this.downhillDrop(i) > 0.04;
         const moving =
           outflow + inflow > ACTIVE_EPS ||
           Math.abs(dh) > ACTIVE_EPS ||
           Math.hypot(this.vx[i]!, this.vz[i]!) > VEL_SLEEP;
-        const stayAwake = this.live[i]!
-          ? moving || unsettled || downhill
-          : Math.hypot(this.vx[i]!, this.vz[i]!) > VEL_SLEEP || Math.abs(dh) > 0.04;
+        const ripple = Math.hypot(this.px[i]!, this.pz[i]!) > 0.02;
+        const stayAwake =
+          h > MIN_DEPTH &&
+          (moving || unsettled || downhill || ripple || (this.live[i]! && moving));
 
         if (stayAwake && h > MIN_DEPTH) {
           next.add(i);
@@ -555,7 +591,7 @@ export class FluidField {
     }
   }
 
-  /** Bleed velocity and sub-cell ripple offset so motion dies without removing water. */
+  /** Bleed velocity and relax depth toward rest so ripples settle instead of streaking. */
   private dampMotion(dt: number, cells: Iterable<number>): void {
     for (const i of cells) {
       if (this.h[i]! <= MIN_DEPTH) continue;
@@ -564,9 +600,27 @@ export class FluidField {
         this.vx[i] = 0;
         this.vz[i] = 0;
       } else {
-        const damp = Math.pow(0.82, dt * 60);
+        const mudSlow = this.mud[i] ? 0.92 : 0.82;
+        const damp = Math.pow(mudSlow, dt * 60);
         this.vx[i] = this.vx[i]! * damp;
         this.vz[i] = this.vz[i]! * damp;
+      }
+
+      const target = this.targetDepth(i);
+      const h = this.h[i]!;
+      const hasRest = !Number.isNaN(this.restDepth[i]!);
+      const rest = hasRest ? this.restDepth[i]! : target;
+      const rate = this.mud[i] ? 0.6 : 5.5;
+      if (this.mud[i]) {
+        const diff = rest - h;
+        if (Math.abs(diff) > 0.015) {
+          this.h[i] = h + diff * Math.min(1, dt * rate);
+          if (Math.abs(this.h[i]! - rest) > 0.015) this.wake(i);
+        }
+      } else if (hasRest && h > rest + 0.015) {
+        // Calm water: bleed splash bulges back to rest without injecting volume.
+        this.h[i] = h + (rest - h) * Math.min(1, dt * rate);
+        if (this.h[i]! > rest + 0.015) this.wake(i);
       }
     }
   }
@@ -669,18 +723,22 @@ export class FluidField {
         this.pz[i] = 0;
         continue;
       }
+      const mud = this.mud[i]! === 1;
+      const driftMul = mud ? 0.35 : drift;
+      const dampMul = mud ? 0.94 : damp;
       const speed = Math.hypot(this.vx[i]!, this.vz[i]!);
       if (speed < VEL_SLEEP) {
-        this.px[i] = this.px[i]! * 0.65;
-        this.pz[i] = this.pz[i]! * 0.65;
+        const snap = mud ? 0.82 : 0.65;
+        this.px[i] = this.px[i]! * snap;
+        this.pz[i] = this.pz[i]! * snap;
         if (Math.abs(this.px[i]!) < 0.015) this.px[i] = 0;
         if (Math.abs(this.pz[i]!) < 0.015) this.pz[i] = 0;
         continue;
       }
-      let ox = this.px[i]! + this.vx[i]! * dt * drift;
-      let oz = this.pz[i]! + this.vz[i]! * dt * drift;
-      ox *= damp;
-      oz *= damp;
+      let ox = this.px[i]! + this.vx[i]! * dt * driftMul;
+      let oz = this.pz[i]! + this.vz[i]! * dt * driftMul;
+      ox *= dampMul;
+      oz *= dampMul;
       if (ox > maxOff) ox = maxOff;
       if (ox < -maxOff) ox = -maxOff;
       if (oz > maxOff) oz = maxOff;
@@ -695,10 +753,11 @@ export class FluidField {
   }
 
   /** One directed pipe's new flux from cell `top` height into neighbour `j`. */
-  private pipe(prev: number, top: number, j: number, dt: number): number {
+  private pipe(prev: number, top: number, j: number, dt: number, fromI: number): number {
     const topJ = this.bed[j]! + this.obstacle[j]! + this.h[j]!;
     const dHead = top - topJ;
-    const f = prev * FLUX_DAMP + dt * GRAVITY * dHead;
+    let f = prev * FLUX_DAMP + dt * GRAVITY * dHead;
+    if (this.mud[fromI] || this.mud[j]) f *= 0.28;
     return f > 0 ? f : 0;
   }
 
@@ -807,8 +866,20 @@ export class FluidField {
     if (gx < 0 || gz < 0 || gx >= this.w || gz >= this.d) return false;
     const i = this.idx(gx, gz);
     if (!this.mask[i]) return false;
-    this.h[i] = Math.max(this.h[i]!, depth);
-    // Deposited spray is temporary — no rest depth bump so it can evaporate or settle.
+    return this.splashAt(i, depth);
+  }
+
+  /** Footstep / spray impact — mud keeps volume; calm water gets a brief bulge that settles. */
+  splashAt(i: number, depth = MIN_WATER_LAYER): boolean {
+    const lift = depth * 0.25;
+    if (this.mud[i]) {
+      this.h[i] = Math.max(this.h[i]!, this.h[i]! + lift * 0.55);
+    } else if (!Number.isNaN(this.restDepth[i]!)) {
+      const rest = this.restDepth[i]!;
+      this.h[i] = Math.min(this.h[i]! + lift, rest + 0.12);
+    } else {
+      this.h[i] = Math.max(this.h[i]!, lift);
+    }
     this.wake(i);
     return true;
   }

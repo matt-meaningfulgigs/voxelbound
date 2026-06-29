@@ -120,8 +120,7 @@ export function groupXzClusters<T extends GridCell>(cells: Map<string, T>): Clus
   return groups;
 }
 
-/** Scale factor for a merged supervoxel from occupied cell count. */
-export function supervoxelScale(cellCount: number, densityBonus = 0): number {
-  if (cellCount <= 1) return 1;
-  return Math.cbrt(cellCount) * (1 + densityBonus * 0.1);
+/** @deprecated Clusters render as unit cubes; grouping kept for tests / future material passes. */
+export function supervoxelScale(_cellCount: number, _densityBonus = 0): number {
+  return 1;
 }

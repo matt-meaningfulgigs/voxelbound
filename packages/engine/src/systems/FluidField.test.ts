@@ -91,6 +91,28 @@ describe('FluidField', () => {
     expect(f.depthIdx(added[0]!)).toBeCloseTo(1.5, 1);
   });
 
+  it('impulse on calm lake settles without permanent depth streaks', () => {
+    const f = new FluidField(flatField(12, 12));
+    const cells = f.seedDisc(6, 6, 4);
+    f.fillTo(cells, 3);
+    const rest = f.depthAt(6, 6);
+    f.impulse(6, 6, 22, 0.5);
+    expect(f.depthAt(6, 6)).toBeGreaterThan(rest);
+    for (let n = 0; n < 900; n++) f.step(1 / 60);
+    expect(Math.abs(f.depthAt(6, 6) - rest)).toBeLessThan(0.25);
+  });
+
+  it('mud holds extra depth longer than water', () => {
+    const f = new FluidField(flatField(16, 16));
+    f.seedMudDisc(8, 8, 4, 2);
+    const rest = f.depthAt(8, 8);
+    f.impulse(8, 8, 18, 0.4);
+    const peak = f.depthAt(8, 8);
+    expect(peak).toBeGreaterThan(rest + 0.05);
+    for (let n = 0; n < 120; n++) f.step(1 / 60);
+    expect(f.depthAt(8, 8)).toBeGreaterThan(rest + 0.02);
+  });
+
   it('evaporates tiny disconnected puddles', () => {
     const f = new FluidField(flatField(20, 8));
     const lone = f.seedDisc(2, 4, 0.6);

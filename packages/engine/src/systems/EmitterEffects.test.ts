@@ -39,9 +39,10 @@ describe('classifyFireClusters', () => {
 });
 
 describe('fireClusterScale', () => {
-  it('grows with cluster mass', () => {
+  it('grows brightness with cluster mass (not geometry)', () => {
     expect(fireClusterScale(1, 1)).toBeLessThan(fireClusterScale(40, 4));
-    expect(fireClusterScale(80, 6)).toBeGreaterThan(1.5);
+    expect(fireClusterScale(80, 6)).toBeLessThanOrEqual(1.45);
+    expect(fireClusterScale(80, 6)).toBeGreaterThan(1.1);
   });
 });
 

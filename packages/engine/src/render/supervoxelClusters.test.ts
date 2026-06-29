@@ -2,12 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { groupFaceClusters, groupXzClusters, supervoxelScale } from '../render/supervoxelClusters';
 
 describe('supervoxelScale', () => {
-  it('returns 1 for a single cell', () => {
+  it('always returns 1 — clusters are unit cubes, not giant meshes', () => {
     expect(supervoxelScale(1)).toBe(1);
-  });
-
-  it('grows with cell count', () => {
-    expect(supervoxelScale(8)).toBeGreaterThan(supervoxelScale(1));
+    expect(supervoxelScale(8)).toBe(1);
   });
 });
 
